@@ -121,7 +121,7 @@ export const FILE_STATUS: Record<FileStatus, BadgeMeta> = {
   processing: { label: "Processing", ...BLUE, icon: "loader" },
   ready: { label: "Ready", ...GRN, icon: "circle-check" },
   failed: { label: "Failed", ...RED, icon: "circle-x" },
-  quarantined: { label: "Quarantined", ...RED, icon: "shield-alert" },
+  quarantined: { label: "Quarantined: malware found", ...RED, icon: "shield-alert" },
 };
 
 export const INTEGRATION_STATUS: Record<IntegrationStatus, BadgeMeta> = {

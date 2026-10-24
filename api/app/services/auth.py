@@ -204,6 +204,13 @@ class AuthService:
     def login(
         self, email: str, password: str, user_agent: str | None
     ) -> tuple[str, User, Workspace, WorkspaceMembership]:
+        user, ws, membership = self.authenticate(email, password)
+        raw = self.create_session(user, ws, user_agent)
+        self._log("auth.login", "Signed in", user, ws.id)
+        return raw, user, ws, membership
+
+    def authenticate(self, email: str, password: str) -> tuple[User, Workspace, WorkspaceMembership]:
+        """Check email + password only (no session). Failures are audited and generic."""
         email = email.lower()
         user = self.db.execute(select(User).where(User.email == email)).scalar_one_or_none()
         ok = verify_password(user.password_hash if user else None, password)
@@ -220,9 +227,7 @@ class AuthService:
                 WorkspaceMembership.workspace_id == ws.id, WorkspaceMembership.user_id == user.id
             )
         ).scalar_one()
-        raw = self.create_session(user, ws, user_agent)
-        self._log("auth.login", "Signed in", user, ws.id)
-        return raw, user, ws, membership
+        return user, ws, membership
 
     def create_session(self, user: User, ws: Workspace, user_agent: str | None) -> str:
         now = utcnow()
@@ -276,11 +281,20 @@ class AuthService:
         # Proving control of the inbox also verifies the address.
         if user.email_verified_at is None:
             user.email_verified_at = utcnow()
-        # Account recovery ends every existing session.
+        # Account recovery ends every existing session and every pending second-step challenge.
         self.db.execute(
             update(AuthSession)
             .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
             .values(revoked_at=utcnow(), revoked_reason="password_reset")
+        )
+        self.db.execute(
+            update(AuthToken)
+            .where(
+                AuthToken.user_id == user.id,
+                AuthToken.purpose == AuthTokenPurpose.mfa_login.value,
+                AuthToken.used_at.is_(None),
+            )
+            .values(used_at=utcnow())
         )
         self._send(
             user.email,

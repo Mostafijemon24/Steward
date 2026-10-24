@@ -14,10 +14,12 @@ from app.core import ratelimit as RL
 from app.core.config import get_settings
 from app.core.db import get_db
 from app.core.deps import Context, client_ip, csrf_cookie_name, get_context, request_id, session_cookie_name
+from app.core.errors import ApiError
 from app.core.security import new_token
 from app.models import User, Workspace
 from app.services import workspace as W
 from app.services.auth import AuthService, deliver_mail
+from app.services.mfa import MfaService
 
 router = APIRouter()
 
@@ -68,6 +70,22 @@ def _set_session_cookie(response: Response, raw: str) -> None:
     )
 
 
+def mfa_cookie_name() -> str:
+    return "__Host-stw_mfa" if get_settings().cookie_secure else "stw_mfa"
+
+
+def _set_mfa_cookie(response: Response, raw: str) -> None:
+    s = get_settings()
+    response.set_cookie(
+        mfa_cookie_name(), raw, max_age=300, httponly=True, secure=s.cookie_secure, samesite="strict", path="/"
+    )
+
+
+def _clear_mfa_cookie(response: Response) -> None:
+    s = get_settings()
+    response.delete_cookie(mfa_cookie_name(), path="/", secure=s.cookie_secure, httponly=True, samesite="strict")
+
+
 def _clear_session_cookie(response: Response) -> None:
     s = get_settings()
     response.delete_cookie(session_cookie_name(s), path="/", secure=s.cookie_secure, httponly=True, samesite="lax")
@@ -97,18 +115,87 @@ def register(
     return S.Message(message=msg)
 
 
-@router.post("/auth/login", response_model=S.MeOut)
-def login(body: S.LoginIn, request: Request, response: Response, db: Session = Depends(get_db)) -> S.MeOut:
+@router.post("/auth/login", response_model=S.MeOut | S.MfaRequiredOut)
+def login(
+    body: S.LoginIn, request: Request, response: Response, db: Session = Depends(get_db)
+) -> S.MeOut | S.MfaRequiredOut:
     RL.hit(RL.LOGIN_IP, client_ip(request) or "unknown")
     RL.hit(RL.LOGIN_EMAIL, str(body.email))
-    svc = _svc(request, db)
-    raw, user, ws, membership = svc.login(str(body.email), body.password, request.headers.get("user-agent"))
+    svc = MfaService(db, client_ip(request), request_id(request))
+    user, ws, membership = svc.authenticate(str(body.email), body.password)
     # Never keep two sessions alive in one browser: revoke the one this browser presented, if any.
     previous = request.cookies.get(session_cookie_name(get_settings()))
     if previous and len(previous) <= 100:
         svc.revoke_presented_session(previous)
+    if svc.enabled(user):
+        # Password alone is not enough: hand out a short-lived challenge, not a session.
+        _set_mfa_cookie(response, svc.start_challenge(user, ws.id))
+        _clear_session_cookie(response)
+        return S.MfaRequiredOut()
+    raw = svc.create_session(user, ws, request.headers.get("user-agent"))
+    svc._log("auth.login", "Signed in", user, ws.id)
     _set_session_cookie(response, raw)
     return me_out(user, ws, membership.role)
+
+
+@router.post("/auth/mfa/verify", response_model=S.MeOut)
+def mfa_verify(
+    body: S.MfaCodeIn, request: Request, response: Response, background: BackgroundTasks, db: Session = Depends(get_db)
+) -> S.MeOut:
+    raw = request.cookies.get(mfa_cookie_name(), "")
+    if not raw or len(raw) > 100:
+        raise ApiError(401, "mfa_challenge_expired", "Your sign-in step expired. Enter your email and password again.")
+    svc = MfaService(db, client_ip(request), request_id(request))
+    session_raw, user, ws, membership = svc.complete_challenge(raw, body.code, request.headers.get("user-agent"))
+    background.add_task(deliver_mail, svc.settings, list(svc.pending_mail))
+    _clear_mfa_cookie(response)
+    _set_session_cookie(response, session_raw)
+    return me_out(user, ws, membership.role)
+
+
+@router.get("/me/mfa", response_model=S.MfaStatusOut)
+def mfa_status(ctx: Context = Depends(get_context)) -> S.MfaStatusOut:
+    return S.MfaStatusOut.model_validate(MfaService(ctx.db, ctx.ip, ctx.request_id).status(ctx.user))
+
+
+@router.post("/me/mfa/setup", response_model=S.MfaSetupOut)
+def mfa_setup(body: S.MfaPasswordIn, ctx: Context = Depends(get_context)) -> S.MfaSetupOut:
+    out = MfaService(ctx.db, ctx.ip, ctx.request_id).setup(ctx.user, ctx.workspace.id, body.password)
+    return S.MfaSetupOut(**out)
+
+
+@router.post("/me/mfa/enable", response_model=S.RecoveryCodesOut)
+def mfa_enable(
+    body: S.MfaCodeIn, background: BackgroundTasks, ctx: Context = Depends(get_context)
+) -> S.RecoveryCodesOut:
+    svc = MfaService(ctx.db, ctx.ip, ctx.request_id)
+    codes = svc.enable(ctx.user, ctx.workspace.id, body.code, ctx.session)
+    background.add_task(deliver_mail, svc.settings, list(svc.pending_mail))
+    return S.RecoveryCodesOut(
+        recovery_codes=codes,
+        message="Two-step sign-in is on. Save these recovery codes somewhere safe — each works once, and they "
+        "are shown only now. Other sessions were signed out.",
+    )
+
+
+@router.post("/me/mfa/disable", response_model=S.MfaStatusOut)
+def mfa_disable(
+    body: S.MfaPasswordCodeIn, background: BackgroundTasks, ctx: Context = Depends(get_context)
+) -> S.MfaStatusOut:
+    svc = MfaService(ctx.db, ctx.ip, ctx.request_id)
+    svc.disable(ctx.user, ctx.workspace.id, body.password, body.code)
+    background.add_task(deliver_mail, svc.settings, list(svc.pending_mail))
+    return S.MfaStatusOut.model_validate(svc.status(ctx.user))
+
+
+@router.post("/me/mfa/recovery-codes", response_model=S.RecoveryCodesOut)
+def mfa_recovery_codes(body: S.MfaPasswordCodeIn, ctx: Context = Depends(get_context)) -> S.RecoveryCodesOut:
+    codes = MfaService(ctx.db, ctx.ip, ctx.request_id).regenerate_codes(
+        ctx.user, ctx.workspace.id, body.password, body.code
+    )
+    return S.RecoveryCodesOut(
+        recovery_codes=codes, message="New recovery codes created. The old ones no longer work. Save these now."
+    )
 
 
 @router.post("/auth/logout", status_code=204)

@@ -48,12 +48,19 @@ This page separates what is **enforced and covered by an automated test** from w
 | Production guards | Refuses to start in production with the mock provider, an external provider over `http://`, private-network/HTTP egress enabled, or placeholder worker/deletion DB passwords. | `test_mock_provider_and_insecure_egress_are_refused_in_production` |
 | Cross-tenant isolation in the engine | Workers build every fact from the task's own workspace; plans can't reference other workspaces' files; artifacts and tasks are tenant-checked. | `test_plan_cannot_reference_files_that_are_not_attached`, `test_cross_tenant_artifacts_and_tasks_are_isolated` |
 
+## Phase 5 controls
+
+| Control | How | Test(s) |
+|---|---|---|
+| Two-step sign-in (MFA) | TOTP (RFC 6238) + 10 single-use recovery codes (SHA-256 hashed). A correct password alone yields only a 5-minute, single-use, httpOnly `__Host-` challenge, never a session. Codes can't be replayed (last used time step, row lock). 10 tries / 15 min per user, 30 per IP. Setup/disable/new codes need the password again (+ a code to disable). Password reset and turning MFA off cancel pending challenges; a reset never disables MFA. Owner e-mailed after 5 failed second steps. | `test_mfa.py` (18), `e2e/mfa.mjs` |
+| Secrets at rest | MFA seeds: AES-256-GCM, purpose/owner bound (`SECRETS_ENCRYPTION_KEY`, API only, rotation via `…_PREVIOUS_KEY`). Integration credentials: sealed to an X25519 public key (ephemeral ECDH + HKDF + AES-GCM); the API holds only the public key, the tools worker the private key; the API DB role cannot even SELECT the column. Production refuses development keys. | `test_crypto_binds_purpose_and_detects_tampering`, `test_integration_credentials_need_the_workers_private_key`, `test_connect_stores_credentials_encrypted_and_never_returns_them` |
+| Malware scanning | ClamAV clamd (INSTREAM) on every upload; infected → quarantined, not downloadable; scanner down or error → upload refused (fail closed); limits exceeded/encrypted content → reported as found. clamd isolated on an API-only network, no internet, read-only FS, SETUID/SETGID only; signatures via a separate freshclam container. | `test_malware_scan.py` (8), production rehearsal with real clamd |
+| WordPress write | Draft posts only (status forced and checked); WordPress Application Password; exact title/text bound to a one-time approval; destination re-checked at execution; allowlist HTML check (parser-based, entity-aware) refuses scripts, event handlers, unsafe URLs; egress allowlist, HTTPS, no POST redirects; credential never in logs, outputs or API responses. | `test_wordpress_write.py` (42) |
+
 ## Designed but NOT enforced yet
 
 | Item | Current state |
 |---|---|
-| Malware scanning | Interface present (`FileScanner`). Files are `unscanned` ("scanner not configured"). |
-| Encrypted secret storage | No integration credentials are collected or stored. The model API key lives in server environment variables only. |
 | Network-level egress firewall | The application enforces egress rules and Compose separates networks, but the `egress` network itself is not filtered by a firewall/proxy. Add one in production. |
 | VM-grade sandbox | Code execution uses Linux namespaces + limits on the worker host. For hostile code use gVisor/Firecracker. |
 | Nonce-based CSP | The web CSP still allows inline scripts (`'unsafe-inline'`), which Next.js needs without per-request nonces. Moving to nonces needs dynamic rendering via middleware. |
@@ -63,7 +70,7 @@ This page separates what is **enforced and covered by an automated test** from w
 | Tamper-evident (hash-chained) audit log | Append-only is enforced for the app role and by a trigger, but the schema owner can disable the trigger. Hash chaining or shipping events to an external write-once log is future work. |
 | Retention for other data | Deleted files are purged automatically after `DELETION_RETENTION_DAYS`. Tasks, audit events and model usage records have no automated retention yet. |
 | Automated, restore-tested backups | `deploy/backup.sh` (database + files + checksummed manifest, optional age encryption) and `deploy/restore.sh verify/restore` were tested in the production rehearsal (verify, tamper detection, encrypted backup, full restore). Scheduling, off-site copies and the weekly `verify` on the real server are operator tasks (docs/DEPLOYMENT.md §8). |
-| MFA, session list / remote sign-out, account lockout notifications | Not implemented. |
+| Workspace-wide MFA requirement, session list / remote sign-out, WebAuthn/passkeys | Not implemented (per-user TOTP MFA exists). |
 | Data export and account deletion | Requests are recorded for manual handling. |
 
 ## HTTPS assumptions

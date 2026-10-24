@@ -29,6 +29,7 @@ PUBLIC = {
     ("POST", "/auth/resend-verification"),
     ("POST", "/auth/forgot-password"),
     ("POST", "/auth/reset-password"),
+    ("POST", "/auth/mfa/verify"),  # second sign-in step: needs the challenge cookie, not a session
 }
 
 # Write routes a viewer may still use (they only touch the viewer's own account).
@@ -39,6 +40,10 @@ VIEWER_ALLOWED = {
     ("POST", "/notifications/{notification_id}/read"),
     ("POST", "/account/export-request"),
     ("POST", "/account/deletion-request"),
+    ("POST", "/me/mfa/setup"),
+    ("POST", "/me/mfa/enable"),
+    ("POST", "/me/mfa/disable"),
+    ("POST", "/me/mfa/recovery-codes"),
 }
 
 # Owner/admin-only write routes (a member must get 403).

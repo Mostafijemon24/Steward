@@ -125,6 +125,9 @@ class MockProvider:
 
     def generate(self, req: ModelRequest, *, timeout: float) -> ModelResponse:
         prompt = "\n".join(m.content for m in req.messages)
+        delay = get_settings().mock_latency_ms
+        if delay > 0:  # perf tests: behave like a slow remote model
+            time.sleep(min(delay / 1000, timeout))
         if MOCK_SCRIPT:
             item = MOCK_SCRIPT.popleft()
             if isinstance(item, Exception):

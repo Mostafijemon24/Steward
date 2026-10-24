@@ -123,7 +123,8 @@ try {
     await input.setInputFiles({ name: "crawl-e2e.csv", mimeType: "text/csv", buffer: Buffer.from("url,status\n/,200\n") });
     await page.getByRole("dialog").getByRole("button", { name: /upload|add file/i }).last().click();
     await page.getByText("crawl-e2e.csv").first().waitFor();
-    await page.locator("text=/not scanned/i >> visible=true").first().waitFor();
+    // "Not scanned" without a scanner; "Scanned — no malware found" when ClamAV is configured.
+    await page.locator("text=/not scanned|no malware found/i >> visible=true").first().waitFor();
   }, page);
 
   await step("file-deletion-request-to-approval", async () => {

@@ -122,6 +122,19 @@ def handle_tool_run(db: Session, job: Q.ClaimedJob, settings: Settings, factory:
     done = [s for s in current_steps(db, task) if s.state == StepState.done.value]
     for s in done:
         env.step_outputs_classification[s.step_key] = str((s.output or {}).get("_classification", "confidential"))
+    # The approval covers the destinations shown when the step was planned. If settings changed since
+    # (e.g. WordPress reconnected to another site), the step must not run against the new target.
+    if tool.network and sorted(tool.destinations(args, env)) != sorted(step.destinations or []):
+        _fail_step(
+            db,
+            task,
+            step,
+            job,
+            "destination_changed",
+            "The destination changed after this step was planned and approved; refusing to run.",
+            settings,
+        )
+        return
     decision = evaluate_step(tool, args, env, settings, task.mode)
     if decision.outcome == "deny":
         step.state = StepState.blocked.value

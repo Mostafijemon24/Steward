@@ -30,6 +30,8 @@ The browser calls these through the web app's own origin (`/api/v1/...` is forwa
 | Other writes per user | 120 / min |
 | Account requests per user | 3 / hour |
 | Denied-ID probes per user (404s that are audited) | 30 / 10 min |
+| Two-step codes per user / per IP | 10 / 15 min · 30 / 15 min |
+| Password re-checks for security settings per user | 10 / 15 min |
 
 Client IP for these limits: the peer address, or `X-Real-IP` set by Caddy when `TRUST_PROXY_HEADERS=true`. `X-Forwarded-For` is never trusted. Register, forgot-password and resend-verification always take at least `AUTH_RESPONSE_FLOOR_MS`.
 
@@ -39,7 +41,7 @@ viewer = read-only (plus own preferences, onboarding, notifications). member = a
 
 ### Common error codes
 
-`not_authenticated`, `session_expired`, `invalid_credentials`, `csrf_failed`, `forbidden`, `not_found`, `validation_error`, `rate_limited`, `quota_exceeded`, `invalid_state_transition`, `action_not_allowed`, `invalid_or_expired_token`, `approval_expired`, `approval_already_decided`, `approval_payload_changed`, `acknowledgement_required`, `confirmation_mismatch`, `deletion_already_requested`, `unsupported_file_type`, `file_too_large`, `file_empty`, `file_quarantined`, `integration_not_available`, `integration_not_connected`, `scheduler_not_configured`, `payload_too_large`, `internal_error`.
+`not_authenticated`, `session_expired`, `invalid_credentials`, `csrf_failed`, `forbidden`, `not_found`, `validation_error`, `rate_limited`, `quota_exceeded`, `invalid_state_transition`, `action_not_allowed`, `invalid_or_expired_token`, `approval_expired`, `approval_already_decided`, `approval_payload_changed`, `acknowledgement_required`, `confirmation_mismatch`, `deletion_already_requested`, `unsupported_file_type`, `file_too_large`, `file_empty`, `file_quarantined`, `scanner_unavailable`, `invalid_code`, `invalid_password`, `mfa_challenge_expired`, `mfa_not_set_up`, `mfa_already_enabled`, `mfa_not_enabled`, `integration_not_available`, `integration_not_connected`, `scheduler_not_configured`, `payload_too_large`, `internal_error`.
 
 ## Endpoints
 
@@ -51,11 +53,17 @@ viewer = read-only (plus own preferences, onboarding, notifications). member = a
 | `POST /auth/register` | `{name, email, password, accept_terms}` → `202 {message}` | Same response whether or not the email exists. Sends a verification link (dev: file in `MAIL_OUTBOX_DIR`). Does **not** sign in. Password: 10–128 chars incl. a digit. |
 | `POST /auth/verify-email` | `{token}` → `{message}` | Single-use, 24 h. |
 | `POST /auth/resend-verification` | `{email}` → `202 {message}` | Generic response. |
-| `POST /auth/login` | `{email, password}` → `Me` + session cookie | Requires a verified email. All failures → `401 invalid_credentials` with one generic message. Rotates to a new session. |
+| `POST /auth/login` | `{email, password}` → `Me` + session cookie | Requires a verified email. If two-step sign-in is on: → `{mfa_required: true, methods}` and a 5-minute httpOnly challenge cookie, **no session**. All failures → `401 invalid_credentials` with one generic message. Rotates to a new session. |
+| `POST /auth/mfa/verify` | `{code}` → `Me` + session cookie | Second step. `code` = 6-digit authenticator code or a recovery code. Wrong → `401 invalid_code` (the challenge stays valid until it expires); expired/used/missing challenge → `401 mfa_challenge_expired`. Codes can't be reused. |
 | `POST /auth/logout` | → `204` | Revokes the session server-side. |
 | `POST /auth/forgot-password` | `{email}` → `202 {message}` | Generic response. Link valid 1 h, single use. |
 | `POST /auth/reset-password` | `{token, password}` → `{message}` | Revokes **all** sessions of the user. |
 | `GET /me` | → `Me` | `{user, workspace: {id, name, role}, demo:false}` |
+| `GET /me/mfa` | → `{enabled, pending_setup, enabled_at, recovery_codes_remaining}` | Never returns the secret. |
+| `POST /me/mfa/setup` | `{password}` → `{secret, otpauth_uri, qr_svg_data_uri}` | Re-authentication. Shown once; the seed is stored AES-GCM encrypted. `409 mfa_already_enabled` if on. |
+| `POST /me/mfa/enable` | `{code}` → `{recovery_codes[10], message}` | Confirms setup with a current code. Signs out other sessions; e-mail notice. Codes are shown only now. |
+| `POST /me/mfa/disable` | `{password, code}` → `MfaStatus` | Password **and** a current code (or recovery code). E-mail notice. |
+| `POST /me/mfa/recovery-codes` | `{password, code}` → `{recovery_codes[10], message}` | Old codes stop working. |
 | `POST /me/onboarding` | `{goals[], where[], ai_rules}` → `Me` | Codes are `[a-z0-9_]`, ≤ 10 each. |
 | `PATCH /me/preferences` | `{name?, timezone?, notifications?}` → `Settings` | |
 | `POST /account/export-request` | → `201 AccountRequest` | Recorded for manual handling. |
@@ -112,7 +120,7 @@ Task state machine: `api/app/domain/task_states.py` (tested for every pair). Onl
 | `PATCH /automations/{automation_id}` | `{enabled}` → `Automation` | Pausing clears the next run; enabling schedules it. The scheduler runs each slot at most once (row lock + per-slot idempotency key). |
 | `POST /automations/{automation_id}/run` | → `201 Task` | Creates a task and queues planning. |
 | `GET /integrations` | → `Integration[]` | Catalog with this workspace's status. `operational=true` only for real adapters (WordPress read-only; the AI provider configured by the administrator). Others are listed as not built. |
-| `POST /integrations/wordpress/connect` | `{site_url}` → `202 Integration` | Owner/admin. `https://` only; the domain must already be on the allowed list. No credentials. Stays `not_connected` until the tools worker verifies `/wp-json/` (then `connected` or `error` with a message). |
+| `POST /integrations/wordpress/connect` | `{site_url, username?, application_password?}` → `202 Integration` | Owner/admin. `https://` only; the domain must already be on the allowed list. Without credentials: read-only. With a WordPress **Application Password** (both fields or neither): the agent may also create **draft** posts (tool `wordpress.create_draft`, switch `wp_write`, each draft needs a one-time approval of the exact text). The password is stored AES-256-GCM encrypted; it is never returned, logged or readable by the API role. Stays `not_connected` until the tools worker verifies `/wp-json/` and, with credentials, `users/me` with `edit_posts` (then `connected` or `error` with a message). `Integration.write_access` shows whether drafts are enabled. Disconnect wipes the stored credential. |
 | `POST /integrations/{key}/connect` | → `409 integration_not_available` | Audited. For integrations that are not built (and `ai_provider`, which is configured on the server). No credentials are ever collected. |
 | `POST /integrations/{key}/disconnect` | → `Integration` | Clears the stored site URL and scopes. |
 

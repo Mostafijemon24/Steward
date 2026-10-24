@@ -29,7 +29,7 @@ from app.engine.egress import host_allowed
 from app.engine.tools import tool_enabled
 from app.engine.tools.base import PlanEnv, ToolArgs, ToolDefinition
 
-POLICY_VERSION = "p3-2026-10-24.1"
+POLICY_VERSION = "p5-2026-10-24.1"
 
 Outcome = Literal["allow", "require_approval", "deny"]
 
@@ -133,20 +133,8 @@ def evaluate_step(
             rules=["delete.request_only"],
         )
 
-    if impact in ALWAYS_APPROVE:
-        if task_mode == "prepare" and impact != "sensitive_change":
-            return _deny("Prepare mode never applies changes.", "mode.prepare_no_changes", cls.value)
-        cat = ALWAYS_APPROVE[impact]
-        return Decision(
-            "require_approval",
-            [f"{tool.label} always needs a one-time approval."],
-            cat.value,
-            impact in ("publish", "send_message"),
-            cls.value,
-            rules=[f"impact.{impact}_always_approve"],
-        )
-
     if tool.network:
+        # Checked before the approval rules: an approval can never widen the allowlist.
         if not destinations:
             return _deny("No destination for a network tool.", "network.no_destination", cls.value)
         if not env.allowed_domains:
@@ -160,6 +148,23 @@ def evaluate_step(
                 return _deny(
                     f"{d} is not on this workspace's allowed domains list.", "network.domain_not_allowed", cls.value
                 )
+
+    if impact in ALWAYS_APPROVE:
+        if task_mode == "prepare" and impact != "sensitive_change":
+            return _deny("Prepare mode never applies changes.", "mode.prepare_no_changes", cls.value)
+        leaves = impact in ("publish", "send_message") or tool.network
+        if leaves and cls == DataClass.unknown:
+            return _deny("Unclassified data never leaves the workspace.", "class.unknown_never_leaves", cls.value)
+        cat = ALWAYS_APPROVE[impact]
+        return Decision(
+            "require_approval",
+            [f"{tool.label} always needs a one-time approval."]
+            + ([f"The approved content is sent to {', '.join(destinations)}."] if tool.network else []),
+            cat.value,
+            leaves,
+            cls.value,
+            rules=[f"impact.{impact}_always_approve"],
+        )
 
     if impact == "external_read":
         if PrivacyMode(env.privacy_mode) == PrivacyMode.strict:

@@ -15,6 +15,7 @@ const MAP: Record<string, L.LucideIcon> = {
   "building-2": L.Building2,
   "calendar-clock": L.CalendarClock,
   check: L.Check,
+  "chevron-down": L.ChevronDown,
   "chevron-left": L.ChevronLeft,
   "chevron-right": L.ChevronRight,
   "chevrons-up-down": L.ChevronsUpDown,

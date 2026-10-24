@@ -18,6 +18,7 @@ from app.engine.tools.misc_tools import (
     WORDPRESS_WRITE,
 )
 from app.engine.tools.web_tools import SEO_AUDIT, WEB_INSPECT, WORDPRESS_READ
+from app.engine.tools.wp_tools import WORDPRESS_CREATE_DRAFT
 
 REGISTRY: dict[str, ToolDefinition] = {
     t.id: t
@@ -27,6 +28,7 @@ REGISTRY: dict[str, ToolDefinition] = {
         WEB_INSPECT,
         SEO_AUDIT,
         WORDPRESS_READ,
+        WORDPRESS_CREATE_DRAFT,
         REPORT_WRITE,
         AI_SUMMARIZE,
         CODE_RUN_PYTHON,

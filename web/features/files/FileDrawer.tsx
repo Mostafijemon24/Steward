@@ -9,7 +9,7 @@ import { fmtBytes, fmtDateTime } from "@/lib/format";
 import { Drawer, ErrorState, Icon, Skeleton } from "@/components/ui";
 import { useUi } from "@/lib/session";
 import { DeleteFileModal } from "./DeleteFileModal";
-import { SCAN_TEXT, fileIcon, isBusy } from "./shared";
+import { fileIcon, isBusy, scanText } from "./shared";
 
 const CLS_ORDER: FileClassification[] = ["confidential", "internal", "public", "unknown"];
 
@@ -128,8 +128,8 @@ export function FileDrawer({ fileId, fallback, onClose }: { fileId: string; fall
           <div role="alert" className="flex gap-2 rounded-lg border border-danger-line bg-danger-soft px-3.5 py-3 text-[13.5px] text-danger">
             <Icon name="circle-alert" size={15} className="mt-0.5" />
             <span>
-              {f.error_message}
-              {quarantined && `${f.error_message ? " " : ""}The file is isolated and can't be opened or used by any task.`}
+              {quarantined && "Quarantined: malware found — can't be opened. The file is isolated and can't be downloaded or used by any task."}
+              {f.error_message && `${quarantined ? " " : ""}${f.error_message}`}
             </span>
           </div>
         )}
@@ -154,9 +154,16 @@ export function FileDrawer({ fileId, fallback, onClose }: { fileId: string; fall
           </dd>
         </dl>
 
-        <div className="flex items-start gap-2 text-[13px]" style={{ color: f.scan_status === "infected" ? "#B42318" : f.scan_status === "clean" ? "#16803C" : "#667085" }}>
-          <Icon name={f.scan_status === "clean" ? "shield-check" : "shield-alert"} size={15} className="mt-0.5" />
-          <span>{SCAN_TEXT[f.scan_status]}</span>
+        <div
+          className="flex items-start gap-2 text-[13px]"
+          style={{ color: quarantined || f.scan_status === "infected" ? "#B42318" : f.scan_status === "clean" ? "#16803C" : "#667085" }}
+        >
+          <Icon name={f.scan_status === "clean" && !quarantined ? "shield-check" : "shield-alert"} size={15} className="mt-0.5" />
+          <span>
+            <span className="sr-only">Malware scan: </span>
+            {scanText(f)}
+            {f.scan_status === "not_configured" && !quarantined && <span className="text-muted"> — no malware scanner is connected on this server.</span>}
+          </span>
         </div>
 
         <div>

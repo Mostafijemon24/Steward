@@ -1,19 +1,46 @@
 "use client";
 
+import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, DEMO_MODE, errorMessage, isApiError, type Integration } from "@/lib/api";
+import { api, DEMO_MODE, errorMessage, isApiError, type Integration, type WordPressCredentials } from "@/lib/api";
 import { useUi } from "@/lib/session";
 import { Badge, Button, Drawer, FieldError, Icon, Label, TextInput } from "@/components/ui";
 import { integrationBadge, isChecking } from "./status";
 
 const HTTPS_SITE = /^https:\/\/[a-z0-9.-]+\.[a-z]{2,63}(\/[^\s?#]*)?$/i;
 
+export interface CredentialErrors {
+  username?: string;
+  application_password?: string;
+}
+
+/**
+ * Same rules as the server: both fields or neither; the Application Password is
+ * pasted as WordPress shows it (24 letters/digits, usually in groups of four).
+ */
+export function checkWpCredentials(username: string, password: string): { creds: WordPressCredentials | null; errors: CredentialErrors } {
+  const u = username.trim();
+  const p = password.trim();
+  if (!u && !p) return { creds: null, errors: {} };
+  const both = "Enter both the WordPress username and the Application Password, or leave both empty for read-only.";
+  if (!u) return { creds: null, errors: { username: both } };
+  if (!p) return { creds: null, errors: { application_password: both } };
+  if (p.length < 16 || p.length > 100 || /[\r\n\t]/.test(p)) {
+    return { creds: null, errors: { application_password: "Paste the Application Password exactly as WordPress shows it, like abcd EFGH 1234 ijkl MNOP 6789." } };
+  }
+  return { creds: { username: u, application_password: p }, errors: {} };
+}
+
 export function IntegrationDrawer({ integration: i, onClose }: { integration: Integration; onClose: () => void }) {
   const { toast } = useUi();
   const qc = useQueryClient();
   const [site, setSite] = useState(i.site_url ?? "");
   const [siteErr, setSiteErr] = useState("");
+  const [showDrafts, setShowDrafts] = useState(false);
+  const [wpUser, setWpUser] = useState("");
+  const [wpPass, setWpPass] = useState("");
+  const [credErr, setCredErr] = useState<CredentialErrors>({});
   const isWp = i.key === "wordpress";
   const isProvider = i.key === "ai_provider";
   const notBuilt = !i.operational && !isProvider;
@@ -25,13 +52,18 @@ export function IntegrationDrawer({ integration: i, onClose }: { integration: In
   };
 
   const connect = useMutation({
-    mutationFn: (url: string) => api.connectWordPress(url),
-    onSuccess: () => {
+    mutationFn: ({ url, creds }: { url: string; creds: WordPressCredentials | null }) => api.connectWordPress(url, creds ?? undefined),
+    onSuccess: (_r, vars) => {
       refresh();
-      toast(DEMO_MODE ? "Demo connection saved (nothing was contacted)." : "Checking the site… It shows as connected once the check succeeds.", "info");
+      // The password is never kept in the browser after it is sent.
+      setWpPass("");
+      if (DEMO_MODE) toast(vars.creds ? "Demo connection saved with drafts allowed. Nothing was contacted and the password was not stored." : "Demo connection saved (nothing was contacted).", "info");
+      else toast(vars.creds ? "Checking the site and the Application Password… It shows as connected once the check succeeds." : "Checking the site… It shows as connected once the check succeeds.", "info");
     },
     onError: (e) => {
-      if (isApiError(e) && (e.fieldErrors().site_url || e.code === "domain_not_allowed")) setSiteErr(e.fieldErrors().site_url ?? e.message);
+      const fe = isApiError(e) ? e.fieldErrors() : {};
+      if (isApiError(e) && (fe.site_url || e.code === "domain_not_allowed")) setSiteErr(fe.site_url ?? e.message);
+      else if (fe.username || fe.application_password) setCredErr({ username: fe.username, application_password: fe.application_password });
       else toast(errorMessage(e), "danger");
     },
   });
@@ -52,7 +84,14 @@ export function IntegrationDrawer({ integration: i, onClose }: { integration: In
       return;
     }
     setSiteErr("");
-    connect.mutate(v);
+    let creds: WordPressCredentials | null = null;
+    if (showDrafts) {
+      const r = checkWpCredentials(wpUser, wpPass);
+      setCredErr(r.errors);
+      if (Object.keys(r.errors).length) return;
+      creds = r.creds;
+    } else setCredErr({});
+    connect.mutate({ url: v, creds });
   };
 
   return (
@@ -114,10 +153,25 @@ export function IntegrationDrawer({ integration: i, onClose }: { integration: In
           {i.status === "connected" && i.site_url && (
             <div className="flex items-center gap-2 text-[13px] text-success">
               <Icon name="circle-check" size={14} />
-              Reading <span className="font-mono">{i.site_url}</span> (read-only)
+              <span>
+                Reading <span className="font-mono">{i.site_url}</span>
+                {i.write_access ? "" : " (read-only)"}
+              </span>
             </div>
           )}
-          <Label htmlFor="wp-site" hint="Read-only, through the site's public REST API. No username, password or key is requested.">
+          {i.write_access && (
+            <div className="flex flex-col gap-1 rounded-md bg-success-soft px-2.5 py-2 text-[13px]">
+              <span className="flex items-center gap-1.5 font-medium text-success">
+                <Icon name="pencil" size={13} />
+                Drafts enabled
+              </span>
+              <span className="text-ink-3 [text-wrap:pretty]">
+                The Agent may create draft posts (never publish, edit or delete), each after your approval of the exact text. The{" "}
+                <Link href="/settings?tab=ai">“WordPress write” switch in Settings</Link> must also be on.
+              </span>
+            </div>
+          )}
+          <Label htmlFor="wp-site" hint="Read-only without credentials, through the site's public REST API.">
             Site address
           </Label>
           <TextInput
@@ -135,9 +189,83 @@ export function IntegrationDrawer({ integration: i, onClose }: { integration: In
           <p className="m-0 text-[12.5px] text-muted [text-wrap:pretty]">
             The site&apos;s domain must be on Settings → Allowed domains first. The Agent only contacts domains on that list, and the site is checked before it shows as connected.
           </p>
+
+          <div className="rounded-md border border-line-soft">
+            <button
+              type="button"
+              aria-expanded={showDrafts}
+              aria-controls="wp-drafts"
+              onClick={() => setShowDrafts((v) => !v)}
+              className="flex w-full items-center gap-2 border-0 bg-transparent px-2.5 py-2 text-left text-[13.5px] font-medium text-ink hover:bg-subtle"
+            >
+              <Icon name={showDrafts ? "chevron-down" : "chevron-right"} size={14} />
+              Also allow draft posts (optional)
+            </button>
+            {showDrafts && (
+              <div id="wp-drafts" className="flex flex-col gap-2.5 border-t border-line-soft px-2.5 pb-3 pt-2.5">
+                <p className="m-0 text-[12.5px] text-ink-3 [text-wrap:pretty]">
+                  Uses a WordPress <strong>Application Password</strong> — a separate password just for this app, not your login password. Create one in WordPress under{" "}
+                  <span className="whitespace-nowrap">Users → Profile → Application Passwords</span>. You can revoke it there at any time.
+                </p>
+                <ul className="m-0 flex list-none flex-col gap-1 p-0 text-[12.5px] text-ink-3">
+                  {[
+                    "The Agent can only create drafts. It can't publish, edit or delete anything.",
+                    "Each draft needs your one-time approval of the exact text first.",
+                    "The password is stored encrypted on the server and never shown again — not even to you. Disconnecting deletes it.",
+                  ].map((t) => (
+                    <li key={t} className="flex gap-1.5">
+                      <Icon name="check" size={13} className="mt-[2px] text-success" />
+                      {t}
+                    </li>
+                  ))}
+                </ul>
+                <div>
+                  <Label htmlFor="wp-user">WordPress username</Label>
+                  <TextInput
+                    id="wp-user"
+                    value={wpUser}
+                    onChange={(e) => setWpUser(e.target.value)}
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    maxLength={60}
+                    invalid={!!credErr.username}
+                    aria-describedby={credErr.username ? "wp-user-err" : undefined}
+                  />
+                  <FieldError id="wp-user-err">{credErr.username}</FieldError>
+                </div>
+                <div>
+                  <Label htmlFor="wp-app-pw">Application Password</Label>
+                  <TextInput
+                    id="wp-app-pw"
+                    type="password"
+                    value={wpPass}
+                    onChange={(e) => setWpPass(e.target.value)}
+                    // "new-password": browsers ignore "off" for password fields and may offer the
+                    // user's own saved password here; this is a WordPress app credential instead.
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    maxLength={100}
+                    placeholder="xxxx xxxx xxxx xxxx xxxx xxxx"
+                    invalid={!!credErr.application_password}
+                    aria-describedby={credErr.application_password ? "wp-app-pw-err" : undefined}
+                  />
+                  <FieldError id="wp-app-pw-err">{credErr.application_password}</FieldError>
+                </div>
+                <p className="m-0 text-[12.5px] text-muted [text-wrap:pretty]">
+                  The <Link href="/settings?tab=ai">“WordPress write” switch in Settings</Link> must also be on (it&apos;s off by default). Leave both fields empty to stay read-only.
+                </p>
+              </div>
+            )}
+          </div>
+          {i.write_access && !showDrafts && (
+            <p className="m-0 text-[12.5px] text-warning [text-wrap:pretty]">
+              Saving without the Application Password switches back to read-only and deletes the stored password.
+            </p>
+          )}
           <div>
             <Button type="submit" variant="primary" size="sm" className="h-9!" loading={connect.isPending}>
-              {i.site_url ? "Save and re-check" : "Connect (read-only)"}
+              {i.site_url ? "Save and re-check" : showDrafts && (wpUser || wpPass) ? "Connect" : "Connect (read-only)"}
             </Button>
           </div>
         </form>

@@ -296,7 +296,7 @@ WORDPRESS_WRITE = _never(
     "WordPress: change content",
     "production_change",
     StepRisk.production_change,
-    "Not available: writing to WordPress needs an authenticated connection with encrypted credential storage, which is not built yet.",
+    "Not available by design: the agent never edits, publishes or deletes WordPress content. Use “WordPress: create a draft post” and publish it yourself in WordPress.",
     "wp_write",
 )
 EMAIL_SEND = _never(

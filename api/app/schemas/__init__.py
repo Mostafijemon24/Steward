@@ -7,7 +7,17 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Generic, Literal, TypeVar
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, StringConstraints, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from app.domain.enums import (
     ApprovalCategory,
@@ -135,6 +145,45 @@ class MeOut(Out):
     user: UserOut
     workspace: WorkspaceSummaryOut
     demo: bool = False
+
+
+class MfaRequiredOut(Out):
+    """Password accepted; a second step is needed (the challenge travels in an httpOnly cookie)."""
+
+    mfa_required: Literal[True] = True
+    methods: list[str] = ["totp", "recovery_code"]
+
+
+class MfaCodeIn(In):
+    # A 6-digit authenticator code, or a recovery code like "abcd-efgh-ijkl".
+    code: str = Field(min_length=6, max_length=32)
+
+
+class MfaPasswordIn(In):
+    password: str = Field(min_length=1, max_length=128)
+
+
+class MfaPasswordCodeIn(In):
+    password: str = Field(min_length=1, max_length=128)
+    code: str = Field(min_length=6, max_length=32)
+
+
+class MfaStatusOut(Out):
+    enabled: bool
+    pending_setup: bool
+    enabled_at: datetime | None
+    recovery_codes_remaining: int
+
+
+class MfaSetupOut(Out):
+    secret: str
+    otpauth_uri: str
+    qr_svg_data_uri: str
+
+
+class RecoveryCodesOut(Out):
+    recovery_codes: list[str]
+    message: str
 
 
 class CsrfOut(Out):
@@ -483,10 +532,30 @@ class IntegrationOut(Out):
     mode: str | None = None
     site_url: str | None = None
     error_message: str | None = None
+    write_access: bool = False
 
 
 class ConnectWordPressIn(In):
     site_url: str = Field(min_length=10, max_length=300)
+    # Optional write access (draft posts only): a WordPress Application Password for this user.
+    username: str | None = Field(default=None, min_length=1, max_length=60)
+    application_password: SecretStr | None = Field(default=None)
+
+    @field_validator("application_password")
+    @classmethod
+    def _app_password(cls, v: SecretStr | None) -> SecretStr | None:
+        if v is None:
+            return None
+        raw = v.get_secret_value().strip()
+        if not 16 <= len(raw) <= 100 or any(ch in raw for ch in "\r\n\t"):
+            raise ValueError("Paste the Application Password exactly as WordPress shows it.")
+        return SecretStr(raw)
+
+    @model_validator(mode="after")
+    def _both_or_neither(self) -> ConnectWordPressIn:
+        if (self.username is None) != (self.application_password is None):
+            raise ValueError("Enter both the WordPress username and the Application Password, or neither.")
+        return self
 
     @field_validator("site_url")
     @classmethod

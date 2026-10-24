@@ -57,6 +57,31 @@ export interface LoginInput {
   password: string;
 }
 
+// ---------- two-step sign-in (MFA) ----------
+export type MfaMethod = "totp" | "recovery_code";
+/** Password accepted, but a second step is needed. No session exists yet (the challenge is an httpOnly cookie). */
+export interface MfaRequired {
+  mfa_required: true;
+  methods: MfaMethod[];
+}
+export type LoginResult = Me | MfaRequired;
+
+export interface MfaStatus {
+  enabled: boolean;
+  pending_setup: boolean;
+  enabled_at: ISODate | null;
+  recovery_codes_remaining: number;
+}
+export interface MfaSetup {
+  secret: string;
+  otpauth_uri: string;
+  qr_svg_data_uri: string; // data:image/svg+xml… usable directly as <img src>
+}
+export interface RecoveryCodes {
+  recovery_codes: string[];
+  message: string;
+}
+
 // ---------- tasks ----------
 export type TaskStatus =
   | "draft"
@@ -388,6 +413,13 @@ export interface Integration {
   mode?: string | null;
   site_url?: string | null;
   error_message?: string | null;
+  write_access: boolean; // WordPress: draft posts enabled with an Application Password
+}
+
+/** Optional WordPress Application Password: both fields or neither. Never returned by the server. */
+export interface WordPressCredentials {
+  username: string;
+  application_password: string;
 }
 
 // ---------- activity / notifications ----------

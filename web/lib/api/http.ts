@@ -86,13 +86,21 @@ export class HttpAgentApi implements AgentApi {
   // auth
   me() { return this.req<T.Me>("GET", "/me"); }
   register(i: T.RegisterInput) { return this.req<{ message: string }>("POST", "/auth/register", i); }
-  login(i: T.LoginInput) { return this.req<T.Me>("POST", "/auth/login", i); }
+  login(i: T.LoginInput) { return this.req<T.LoginResult>("POST", "/auth/login", i); }
+  verifyMfa(code: string) { return this.req<T.Me>("POST", "/auth/mfa/verify", { code }); }
   async logout() { await this.req<void>("POST", "/auth/logout"); }
   verifyEmail(token: string) { return this.req<{ message: string }>("POST", "/auth/verify-email", { token }); }
   resendVerification(email: string) { return this.req<{ message: string }>("POST", "/auth/resend-verification", { email }); }
   forgotPassword(email: string) { return this.req<{ message: string }>("POST", "/auth/forgot-password", { email }); }
   resetPassword(token: string, password: string) { return this.req<{ message: string }>("POST", "/auth/reset-password", { token, password }); }
   completeOnboarding(i: T.OnboardingInput) { return this.req<T.Me>("POST", "/me/onboarding", i); }
+
+  // two-step sign-in
+  mfaStatus() { return this.req<T.MfaStatus>("GET", "/me/mfa"); }
+  setupMfa(password: string) { return this.req<T.MfaSetup>("POST", "/me/mfa/setup", { password }); }
+  enableMfa(code: string) { return this.req<T.RecoveryCodes>("POST", "/me/mfa/enable", { code }); }
+  disableMfa(password: string, code: string) { return this.req<T.MfaStatus>("POST", "/me/mfa/disable", { password, code }); }
+  regenerateRecoveryCodes(password: string, code: string) { return this.req<T.RecoveryCodes>("POST", "/me/mfa/recovery-codes", { password, code }); }
 
   dashboard() { return this.req<T.Dashboard>("GET", "/dashboard"); }
   getAgentStatus() { return this.req<T.AgentStatus>("GET", "/agent/status"); }
@@ -148,7 +156,13 @@ export class HttpAgentApi implements AgentApi {
   // integrations
   listIntegrations() { return this.req<T.Integration[]>("GET", "/integrations"); }
   connectIntegration(key: string) { return this.req<T.Integration>("POST", `/integrations/${encodeURIComponent(key)}/connect`); }
-  connectWordPress(siteUrl: string) { return this.req<T.Integration>("POST", "/integrations/wordpress/connect", { site_url: siteUrl }); }
+  connectWordPress(siteUrl: string, credentials?: T.WordPressCredentials) {
+    // Credentials are sent only when given (both fields); the server never returns the password.
+    const body = credentials
+      ? { site_url: siteUrl, username: credentials.username, application_password: credentials.application_password }
+      : { site_url: siteUrl };
+    return this.req<T.Integration>("POST", "/integrations/wordpress/connect", body);
+  }
   disconnectIntegration(key: string) { return this.req<T.Integration>("POST", `/integrations/${encodeURIComponent(key)}/disconnect`); }
 
   // reports & activity

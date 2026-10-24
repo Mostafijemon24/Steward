@@ -29,6 +29,7 @@ import {
   FileStatusBadge,
   fileIcon,
   isBusy,
+  scanText,
 } from "./shared";
 
 const CLS_KEYS = Object.keys(CLASSIFICATION) as FileClassification[];
@@ -247,7 +248,7 @@ export function FilesScreen() {
                   {typesText} ·{" "}
                   {DEMO_MODE
                     ? "scanned before use"
-                    : "stored privately · malware scanning not configured yet"}
+                    : "stored privately · scanned for malware if this server has a scanner"}
                 </span>
               </button>
 
@@ -370,6 +371,9 @@ export function FilesScreen() {
                         <span className="block text-xs text-muted">
                           {f.type_label} · {fmtBytes(f.size_bytes)} ·{" "}
                           {fmtDateTime(f.uploaded_at)}
+                          {(f.scan_status === "clean" || f.status === "quarantined") && (
+                            <span className={f.status === "quarantined" ? "text-danger" : "text-success"}> · {scanText(f)}</span>
+                          )}
                           {f.deletion_requested && (
                             <span className="text-danger">
                               {" "}

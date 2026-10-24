@@ -20,9 +20,13 @@ certifi==2026.10.23
     #   httpcore
     #   httpx
 cffi==2.1.1
-    # via argon2-cffi-bindings
+    # via
+    #   argon2-cffi-bindings
+    #   cryptography
 click==8.5.0
     # via uvicorn
+cryptography==50.0.2
+    # via steward-api
 dnspython==2.9.0
     # via email-validator
 email-validator==2.3.0
@@ -75,6 +79,8 @@ python-multipart==0.0.32
     # via steward-api
 pyyaml==6.0.3
     # via uvicorn
+segno==1.6.6
+    # via steward-api
 sqlalchemy==2.0.55
     # via
     #   alembic

@@ -140,6 +140,31 @@ class AuthToken(Base):
     __table_args__ = (_check("purpose", E.AuthTokenPurpose), Index("ix_auth_tokens_user_purpose", "user_id", "purpose"))
 
 
+class UserMfa(Base):
+    """TOTP second factor. The seed is AES-GCM encrypted (app.core.crypto), bound to the user id."""
+
+    __tablename__ = "user_mfa"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), primary_key=True)
+    secret_enc: Mapped[str | None] = mapped_column(Text)
+    enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_step: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class MfaRecoveryCode(Base):
+    """Single-use recovery codes; only a SHA-256 hash of each (high-entropy) code is stored."""
+
+    __tablename__ = "mfa_recovery_codes"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    code_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False, unique=True)
+    created_at: Mapped[datetime] = _created()
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_mfa_recovery_codes_user", "user_id"),)
+
+
 class RateLimitBucket(Base):
     __tablename__ = "rate_limit_buckets"
     key: Mapped[str] = mapped_column(String(200), primary_key=True)
@@ -494,6 +519,25 @@ class IntegrationConnection(Base):
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
     __table_args__ = (UniqueConstraint("workspace_id", "key"), _check("status", E.IntegrationStatus))
+
+
+class IntegrationSecret(Base):
+    """Encrypted integration credentials (one per workspace and integration).
+
+    The API role may INSERT/UPDATE but cannot SELECT secret_enc: it never reads a credential back.
+    Only the tools worker reads and decrypts it, right before a call.
+    """
+
+    __tablename__ = "integration_secrets"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False)
+    key: Mapped[str] = mapped_column(String(32), nullable=False)
+    secret_enc: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("workspace_id", "key"),)
 
 
 class Automation(Base):

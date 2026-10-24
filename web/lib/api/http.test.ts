@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpAgentApi } from "./http";
-import { ApiError } from "./client";
+import { ApiError, isMfaRequired } from "./client";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -38,5 +38,30 @@ describe("HttpAgentApi", () => {
     vi.stubGlobal("fetch", vi.fn(async () => respond(422, { error: { code: "validation_error", message: "Some fields need attention.", request_id: "r", details: [{ field: "email", message: "Enter a valid email." }] } })));
     const err = (await new HttpAgentApi().forgotPassword("x").catch((e) => e)) as ApiError;
     expect(err.fieldErrors()).toEqual({ email: "Enter a valid email." });
+  });
+
+  it("passes the two-step answer through and sends the second step to /auth/mfa/verify", async () => {
+    document.cookie = "stw_csrf=tok-abc";
+    const fetchMock = vi.fn(async () => respond(200, { mfa_required: true, methods: ["totp", "recovery_code"] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpAgentApi();
+    const r = await api.login({ email: "a@example.com", password: "pw" });
+    expect(isMfaRequired(r)).toBe(true);
+    await api.verifyMfa("abcd-efgh-ijkl");
+    const [url, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/v1/auth/mfa/verify");
+    expect(JSON.parse(init.body as string)).toEqual({ code: "abcd-efgh-ijkl" });
+  });
+
+  it("sends WordPress credentials only when given", async () => {
+    document.cookie = "stw_csrf=tok-abc";
+    const fetchMock = vi.fn(async () => respond(202, { key: "wordpress" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpAgentApi();
+    await api.connectWordPress("https://example.com");
+    await api.connectWordPress("https://example.com", { username: "ed", application_password: "abcd efgh ijkl mnop" });
+    const bodies = (fetchMock.mock.calls as unknown as [string, RequestInit][]).map(([, i]) => JSON.parse(i.body as string));
+    expect(bodies[0]).toEqual({ site_url: "https://example.com" });
+    expect(bodies[1]).toEqual({ site_url: "https://example.com", username: "ed", application_password: "abcd efgh ijkl mnop" });
   });
 });

@@ -69,7 +69,7 @@ MODEL_LOCATION=external
 | **সম্পন্ন টাস্ক ও রিপোর্ট** | **অনুমোদিত তালিকার বাইরের সাইট ব্লক** |
 | <img src="docs/images/phase3/04-task-completed.png"> | <img src="docs/images/phase3/06-external-transfer-blocked.png"> |
 
-টেস্টের ফলাফল (২০২৬-১০-২৪): ব্যাকএন্ডে ৪১৩টি টেস্ট পাস, ফ্রন্টএন্ডে ৩৯টি, ব্রাউজার end-to-end: smoke ২৫/২৫ ও agent flow ১৩/১৩। স্বাধীন নিরাপত্তা রিভিউতে পাওয়া ১১টি সমস্যার প্রতিটির সমাধান ও রিগ্রেশন টেস্ট আছে (কয়েকটি আংশিক, ডকুমেন্টেড) — [SECURITY_REVIEW.md](SECURITY_REVIEW.md), [PHASE3_REPORT.md](PHASE3_REPORT.md)। ফেজ ৪ (প্রোডাকশন হার্ডেনিং): [PRODUCTION_READINESS_REPORT.md](PRODUCTION_READINESS_REPORT.md), ডিপ্লয় গাইড [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)।
+টেস্টের ফলাফল (২০২৬-১০-২৪): ব্যাকএন্ডে ৪১৩টি টেস্ট পাস, ফ্রন্টএন্ডে ৩৯টি, ব্রাউজার end-to-end: smoke ২৫/২৫ ও agent flow ১৩/১৩। স্বাধীন নিরাপত্তা রিভিউতে পাওয়া ১১টি সমস্যার প্রতিটির সমাধান ও রিগ্রেশন টেস্ট আছে (কয়েকটি আংশিক, ডকুমেন্টেড) — [SECURITY_REVIEW.md](SECURITY_REVIEW.md), [PHASE3_REPORT.md](PHASE3_REPORT.md)। ফেজ ৪ (প্রোডাকশন হার্ডেনিং): [PRODUCTION_READINESS_REPORT.md](PRODUCTION_READINESS_REPORT.md), ডিপ্লয় গাইড [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)। ফেজ ৫: দুই ধাপের সাইন-ইন (অথেনটিকেটর অ্যাপ + রিকভারি কোড), ClamAV দিয়ে আপলোডের ম্যালওয়্যার স্ক্যান, ওয়ার্ডপ্রেসে শুধু ড্রাফট পোস্ট (প্রতিটির আগে আপনার অনুমোদন; পাসওয়ার্ড এনক্রিপ্ট করে রাখা), দুটি API কন্টেইনার যাতে রিস্টার্টে সাইট বন্ধ না হয়, এবং একাধিক অর্কেস্ট্রেটর।
 
 > নিচের বিস্তারিত অংশগুলো মূলত ফেজ ২-এর সময় লেখা। যেখানে পার্থক্য আছে (যেমন "কিছুই চালানো হয় না" বা "ফেজ ৩-এ আসবে"), সেখানে উপরের এই অংশ এবং ইংরেজি [README.md](README.md) সর্বশেষ ও সঠিক তথ্য দেয়।
 

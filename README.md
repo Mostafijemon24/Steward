@@ -31,7 +31,7 @@
 > **Current status: Phase 3 — the agent engine works end to end (not deployed to production).**
 > A task is planned by an AI model, checked by a default-deny policy engine, approved by you (the plan, plus one-time approvals for sensitive steps), executed by isolated background workers, and fully audited.
 > It plans with **any OpenAI-compatible model** you configure on the server (OpenAI, a gateway, or a self-hosted Ollama/vLLM). With **no model configured, tasks wait and nothing is sent anywhere**.
-> Real tools today: read attached files, analyse CSV/text, inspect web pages and run SEO audits on **allowlisted** sites, read a WordPress site (read-only, no credentials), write reports, summarise with the model, run short Python programs in a sandbox (with approval), and *propose* file deletions. Writing to WordPress, sending email and full browser automation are **not built** and are shown as such.
+> Real tools today: read attached files, analyse CSV/text, inspect web pages and run SEO audits on **allowlisted** sites, read a WordPress site and — if you allow it — create **draft** posts that you approve word for word, write reports, summarise with the model, run short Python programs in a sandbox (with approval), and *propose* file deletions. Publishing or editing live WordPress content, sending email and full browser automation are **not built** and are shown as such. Accounts can use two-step sign-in, and uploads can be malware-scanned with ClamAV.
 > No product is "completely secure"; what is enforced and tested — and what is not — is listed in [SECURITY_AND_PRIVACY.md](SECURITY_AND_PRIVACY.md).
 
 "Steward" is a placeholder product name; the repository is called **Live-Agent**.
@@ -122,14 +122,14 @@ More detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 | One-time approvals bound to the exact action, re-checked before running | ✅ |
 | Read and analyse attached text/CSV/Markdown/JSON files | ✅ (`files.read`, `files.analyze`) |
 | Inspect a web page / SEO audit of a page | ✅ allowlisted domains only (`web.inspect`, `seo.audit`) |
-| WordPress | ✅ **read-only** pages/posts via the public REST API — site URL only, no credentials |
+| WordPress | ✅ read pages/posts (public REST API); optional **draft posts only** with an encrypted Application Password — never publishes, edits or deletes; every draft needs your approval |
 | Write a markdown report, downloadable | ✅ (`report.write`) |
 | Summarise results with the AI model | ✅ (`ai.summarize`); external providers need approval for confidential data |
 | Run a short Python program | ✅ in a sandbox, **always with approval**; disabled automatically if the host can't isolate it |
 | Delete files | ✅ only through the deletion workflow: request → your approval → separate deletion service re-checks → soft delete → restorable for 30 days → purged. The agent can only *propose* deletions |
 | Automations | ✅ manual and scheduled; each run creates a task whose plan still needs your approval |
 | Activity & audit log, notifications, security status, settings | ✅ |
-| Change a live website, publish, send email, full browser automation, Notion/cloud storage | ❌ Not built — listed as unavailable, never faked |
+| Publish or change live website content, send email, full browser automation, Notion/cloud storage | ❌ Not built — listed as unavailable, never faked |
 | Malware scanning | ❌ Not connected — files show *Not scanned* |
 
 ### Hard limits — what the agent will never do
@@ -397,7 +397,7 @@ Development emails are written to `api/var/mail-outbox/`.
 5. **Handle approvals** — The **Approvals** page lists everything waiting for you, with coloured warnings (red = data leaves your workspace or deletion; amber = live change, publish, send). Check *what*, *why*, *which items*, *destination*, *consequences* and *can it be undone*, then **Approve once**, **Reject** or **Request changes**.
 6. **Add files** — **Files & Knowledge → Add file.** Files stay private. Set a classification (*Public*, *Internal*, *Confidential*, *Unknown* — Unknown never leaves the workspace). To delete, use **Request deletion** — it becomes an approval; after approval the file moves to **Recently deleted** and can be restored for 30 days.
 7. **Watch progress** — **Tasks** shows every task with filters; open one to see its plan, logs, inputs, outputs and audit events. **Reports & Activity** shows the full audit log.
-8. **Connect WordPress (optional)** — add your site's domain under **Settings → Allowed domains**, then **Integrations → WordPress → Connect** with the site address. No password is asked: the agent reads published pages/posts through the public REST API.
+8. **Connect WordPress (optional)** — add your site's domain under **Settings → Allowed domains**, then **Integrations → WordPress → Connect** with the site address (read-only). To let the agent prepare **draft** posts, also add a WordPress Application Password and switch on *Settings → Tool permissions → WordPress write*.
 9. **Stay safe** — **Security & Privacy** shows the agent's model and where it runs, your privacy mode, what is enforced, recent decisions and blocked actions. **Settings** holds your profile, notifications, AI behaviour, tool switches, allowed domains and usage.
 
 **When should I use it?** Whenever you want work done on your website, content, research or files **without** giving anyone (human or AI) unchecked access — and you want a record of every decision.
@@ -496,8 +496,9 @@ Development emails are written to `api/var/mail-outbox/`.
 | SMTP mailbox | **Yes in production** | For verification and password-reset emails |
 | Domain + DNS | **Yes in production** | For HTTPS |
 | AI model (any OpenAI-compatible `/v1/chat/completions` endpoint) | **Needed for planning** | OpenAI, an API gateway, or a self-hosted Ollama/vLLM/llama.cpp server. Configured only in server environment variables. Without it tasks wait and nothing is sent |
-| WordPress | Optional | Site URL only (read-only, public REST API). No credentials |
-| Malware scanner, Notion, cloud storage, email sending, WordPress write access | Not built | Shown as unavailable in the app |
+| WordPress | Optional | Site URL (read-only); optional Application Password for draft posts (stored encrypted) |
+| Malware scanner | Optional | ClamAV runs on your server (`--profile scan`, `MALWARE_SCANNER=clamav`); signatures download from ClamAV |
+| Notion, cloud storage, email sending, WordPress publishing | Not built | Shown as unavailable in the app |
 
 **This app never asks you to paste passwords or API keys into the web interface.**
 
@@ -613,7 +614,7 @@ Highlights (all enforced **and** covered by automated tests):
 - Separate database roles per process · deletion service with re-validation, soft delete, restore and purge
 - Rate limits, security headers, Content-Security-Policy, production configuration guards
 
-What is **not** enforced yet (malware scanning, encrypted per-workspace secrets, a network-level egress firewall, VM-grade sandboxing, row-level security, a tamper-evident audit chain) is listed honestly in [SECURITY_AND_PRIVACY.md](SECURITY_AND_PRIVACY.md).
+Phase 5 added two-step sign-in, malware scanning and encrypted credential storage. What is **not** enforced yet (a network-level egress firewall, VM-grade sandboxing, row-level security, a tamper-evident audit chain) is listed honestly in [SECURITY_AND_PRIVACY.md](SECURITY_AND_PRIVACY.md).
 
 ---
 
@@ -624,7 +625,9 @@ What is **not** enforced yet (malware scanning, encrypted per-workspace secrets,
 | **1 — Design** | ✅ Done | Clickable prototype of all 20 screens (`project/`) |
 | **2 — Foundation** | ✅ Done | Real auth, workspaces, tasks, approvals, files, audit, API, tests, Docker deployment, security review |
 | **3 — Agent engine** | ✅ Done (not deployed) | AI planner, policy engine, bound approvals, durable queue and workers, model gateway (OpenAI-compatible / local), tools, egress control, sandbox, deletion service with retention, scheduler, WordPress read-only, observability |
-| **4 — Next** | 🔜 | Authenticated integrations with encrypted secret storage (WordPress write, email, cloud storage, Notion), malware scanning, VM-grade sandbox, network egress proxy, hash-chained audit log, row-level security, production deployment |
+| **4 — Production hardening** | ✅ Done (not deployed) | Authz/tenant test matrix, health/metrics, load tests, verified backup & restore, Hostinger deployment guide, CI |
+| **5 — Features & scaling** | ✅ Done (not deployed) | Two-step sign-in (TOTP + recovery codes), ClamAV malware scanning, WordPress draft posts with encrypted credentials, 2 API containers with zero-downtime rolling restarts, orchestrator replicas |
+| **Next** | 🔜 | Workspace-wide MFA requirement, email/cloud integrations, VM-grade sandbox, network egress proxy, hash-chained audit log, row-level security, real VPS deployment |
 
 ---
 
@@ -655,7 +658,7 @@ Run <code>docker compose logs api</code>. The most common cause is the productio
 Only PDF, PNG, JPG, DOCX, XLSX, CSV, TXT, MD and JSON up to 25 MB are accepted, the file extension must match the real content, and files containing scripts, macros or executables are refused.</details>
 
 <details><summary><b>Can I connect my WordPress site?</b></summary>
-Yes, read-only: add the domain to Allowed domains, then Integrations → WordPress → Connect with the site address. No password is asked. Changing your site from the agent is not built yet.</details>
+Yes: add the domain to Allowed domains, then Integrations → WordPress → Connect with the site address (read-only). Optionally add an Application Password so the agent can create **draft** posts — each one needs your approval of the exact text, and you publish it yourself in WordPress.</details>
 
 <details><summary><b>Is my data sent to an AI company?</b></summary>
 Only if your administrator configured an <i>external</i> model — the app says so on the Overview and Security pages. Even then, confidential data is sent only after your one-time approval, unknown data never, and known secrets are redacted first. With a <i>local</i> model, data stays on your own servers (it still leaves this app's process). With no model configured, nothing is sent.</details>
@@ -674,7 +677,7 @@ Only if your administrator configured an <i>external</i> model — the app says 
 | [PRODUCTION_READINESS_REPORT.md](PRODUCTION_READINESS_REPORT.md) | Phase 4: findings, test results, Go/No-Go |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Hostinger VPS deployment, backups, releases, rollback |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Health, metrics, alerts, telemetry policy |
-| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Load-test results, SLOs, when to scale |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Load-test results, SLOs, scaling and restart measurements, when to scale |
 | [PHASE3_REPORT.md](PHASE3_REPORT.md) | Agent engine: what was built, tests, review findings, limitations and risks |
 | [PHASE2_REPORT.md](PHASE2_REPORT.md) | Foundation: what was built, commands run, results, load baseline |
 | [web/FRONTEND_GUIDE.md](web/FRONTEND_GUIDE.md) | Conventions for screens and the API adapter |

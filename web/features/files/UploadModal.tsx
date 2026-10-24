@@ -2,15 +2,21 @@
 
 import { useId, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, DEMO_MODE, errorMessage, isApiError } from "@/lib/api";
+import { api, DEMO_MODE, errorMessage, isApiError, type FileItem } from "@/lib/api";
 import { fmtBytes } from "@/lib/format";
 import { Banner, Button, ErrorState, Icon, Label, Modal, Select, Skeleton } from "@/components/ui";
 import { useUi } from "@/lib/session";
 import { acceptFromLabels } from "./shared";
 
-const SUCCESS_REAL =
-  "Uploaded to private storage. It is not shared with anyone. Malware scanning is not configured yet, so it is marked Not scanned.";
 const SUCCESS_DEMO = "Sample file added. No real file was read from your device.";
+
+/** Honest result text, based on what the server reports for this file. */
+function uploadResult(f: FileItem): { text: string; tone: "success" | "danger" | "info" } {
+  if (f.status === "quarantined" || f.scan_status === "infected")
+    return { text: `${f.name}: quarantined — the malware scanner found a threat. It can't be opened or used by any task.`, tone: "danger" };
+  if (f.scan_status === "clean") return { text: "Uploaded to private storage and scanned — no malware found. It is not shared with anyone.", tone: "success" };
+  return { text: "Uploaded to private storage. It is not shared with anyone. No malware scanner is connected, so it is marked Not scanned.", tone: "success" };
+}
 
 /** "Add a file" dialog (prototype modal.is.upload), with a real file input. */
 export function UploadModal({
@@ -38,11 +44,15 @@ export function UploadModal({
 
   const m = useMutation({
     mutationFn: () => api.uploadFile(file as File, coll),
-    onSuccess: () => {
+    onSuccess: (f) => {
       void qc.invalidateQueries({ queryKey: ["files"] });
       void qc.invalidateQueries({ queryKey: ["dashboard"] });
       void qc.invalidateQueries({ queryKey: ["activity"] });
-      toast(DEMO_MODE ? SUCCESS_DEMO : SUCCESS_REAL, DEMO_MODE ? "info" : "success");
+      if (DEMO_MODE) toast(SUCCESS_DEMO, "info");
+      else {
+        const r = uploadResult(f);
+        toast(r.text, r.tone);
+      }
       onClose();
     },
   });
@@ -58,6 +68,8 @@ export function UploadModal({
     if (m.error.status === 415) serverHint = `Allowed types: ${limits.data.allowed_types.join(", ")}.`;
     if (m.error.status === 413) serverHint = `Maximum size: ${fmtBytes(limits.data.max_bytes)} per file.`;
   }
+  // scanner_unavailable (503): the server's message already says the file wasn't accepted and to retry.
+  const scannerDown = isApiError(m.error) && m.error.code === "scanner_unavailable";
 
   const canUpload = !!file && !!coll && !tooBig && !m.isPending;
 
@@ -145,7 +157,8 @@ export function UploadModal({
               ) : (
                 <>
                   The file is type-checked and size-checked on the server, then kept in private storage. It is classified{" "}
-                  <strong>Unknown — sharing blocked</strong> until you classify it. Malware scanning is not configured yet.
+                  <strong>Unknown — sharing blocked</strong> until you classify it. If this server has a malware scanner, the file is scanned before it is
+                  stored and refused if the scanner can&apos;t be reached; otherwise it is marked Not scanned.
                 </>
               )}
             </p>
@@ -156,7 +169,7 @@ export function UploadModal({
               </Banner>
             )}
             {m.error && (
-              <Banner tone="danger" icon="circle-alert" role="alert" title="The file wasn't uploaded">
+              <Banner tone="danger" icon={scannerDown ? "shield-alert" : "circle-alert"} role="alert" title="The file wasn't uploaded">
                 {errorMessage(m.error)}
                 {serverHint && <> {serverHint}</>}
               </Banner>

@@ -260,6 +260,8 @@ def test_mock_provider_and_insecure_egress_are_refused_in_production() -> None:
         smtp_host="smtp.example.com",
         app_origin="https://app.example.com",
         trust_proxy_headers=True,
+        secrets_encryption_key="cmFuZG9tLWtleS1mb3ItdGVzdHMtMzItYnl0ZXMhISE=",
+        integration_secrets_public_key="cHVibGljLWtleS1mb3ItdGVzdHMtMzItYnl0ZXMhISE=",
     )
     with pytest.raises(ValueError, match="mock"):
         Settings(_env_file=None, **base, model_provider="mock")

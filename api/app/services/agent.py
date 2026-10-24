@@ -258,6 +258,55 @@ def restore_file(ctx: Context, file_id: uuid.UUID) -> S.FileOut:
 
 
 # ---------------------------------------------------------------- integrations
+def store_wordpress_credentials(ctx: Context, username: str, password: str) -> None:
+    """Encrypt and store; the API role can write this table but cannot read secret_enc back."""
+    import json
+
+    from sqlalchemy import update
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from app.core import crypto
+    from app.engine.tools.wp_tools import secret_purpose
+    from app.models import IntegrationSecret
+
+    sealed = crypto.seal_for_worker(
+        json.dumps({"username": username, "password": password}).encode(), secret_purpose(ctx.workspace.id)
+    )
+    # UPDATE then INSERT: an upsert would need SELECT on secret_enc, which this role deliberately lacks.
+    values = {"secret_enc": sealed, "created_by": ctx.user.id, "updated_at": utcnow(), "revoked_at": None}
+    where = (IntegrationSecret.workspace_id == ctx.workspace.id, IntegrationSecret.key == "wordpress")
+    res = ctx.db.execute(
+        update(IntegrationSecret).where(*where).values(**values).execution_options(synchronize_session=False)
+    )
+    if getattr(res, "rowcount", 0) == 0:
+        ins = ctx.db.execute(
+            pg_insert(IntegrationSecret)
+            .values(workspace_id=ctx.workspace.id, key="wordpress", secret_enc=sealed, created_by=ctx.user.id)
+            .on_conflict_do_nothing()
+        )
+        if getattr(ins, "rowcount", 0) == 0:  # another request inserted it meanwhile: overwrite
+            ctx.db.execute(
+                update(IntegrationSecret).where(*where).values(**values).execution_options(synchronize_session=False)
+            )
+
+
+def revoke_integration_secret(ctx: Context, key: str) -> None:
+    from sqlalchemy import update
+
+    from app.models import IntegrationSecret
+
+    ctx.db.execute(
+        update(IntegrationSecret)
+        .where(
+            IntegrationSecret.workspace_id == ctx.workspace.id,
+            IntegrationSecret.key == key,
+            IntegrationSecret.revoked_at.is_(None),
+        )
+        .values(secret_enc=None, revoked_at=utcnow(), updated_at=utcnow())
+        .execution_options(synchronize_session=False)
+    )
+
+
 def connect_wordpress(ctx: Context, body: S.ConnectWordPressIn) -> None:
     ctx.require_role(WorkspaceRole.owner, WorkspaceRole.admin)
     host = urlsplit(body.site_url).hostname or ""
@@ -276,12 +325,24 @@ def connect_wordpress(ctx: Context, body: S.ConnectWordPressIn) -> None:
     if conn is None:
         conn = IntegrationConnection(workspace_id=ctx.workspace.id, key="wordpress", status="not_connected")
         ctx.db.add(conn)
-    conn.config = {"site_url": body.site_url, "mode": "read_only_public_rest"}
-    conn.granted_scopes = ["Read published pages and posts (public REST API)"]
+    write = body.application_password is not None and body.username is not None
+    conn.config = {
+        "site_url": body.site_url,
+        "mode": "read_write_drafts" if write else "read_only_public_rest",
+        **({"username": body.username} if write else {}),
+    }
+    conn.granted_scopes = ["Read published pages and posts (public REST API)"] + (
+        ["Create draft posts (never publishes, edits or deletes; each draft needs your approval)"] if write else []
+    )
     conn.status = "not_connected"  # becomes connected only after the tools worker verifies it
     conn.error_message = "Checking the site…"
     conn.updated_at = utcnow()
     ctx.db.flush()
+    if write:
+        assert body.username is not None and body.application_password is not None
+        store_wordpress_credentials(ctx, body.username, body.application_password.get_secret_value())
+    else:
+        revoke_integration_secret(ctx, "wordpress")
     Q.enqueue(
         ctx.db,
         workspace_id=ctx.workspace.id,
@@ -294,7 +355,8 @@ def connect_wordpress(ctx: Context, body: S.ConnectWordPressIn) -> None:
     ctx.log(
         "integration.connect_requested",
         "integration",
-        f"WordPress connection requested for {host} (read-only, no credentials)",
+        f"WordPress connection requested for {host} "
+        + ("(read + draft posts; Application Password stored encrypted)" if write else "(read-only, no credentials)"),
         target_type="integration",
         target_id="wordpress",
     )

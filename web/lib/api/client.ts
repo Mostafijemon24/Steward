@@ -17,11 +17,16 @@ import type {
   FileListQuery,
   Integration,
   LoginInput,
+  LoginResult,
   Me,
+  MfaRequired,
+  MfaSetup,
+  MfaStatus,
   NotificationItem,
   OnboardingInput,
   Page,
   PreferencesInput,
+  RecoveryCodes,
   RegisterInput,
   SecurityStatus,
   Settings,
@@ -31,6 +36,7 @@ import type {
   TaskSummary,
   UploadLimits,
   Usage,
+  WordPressCredentials,
   WorkspaceSettingsInput,
 } from "./types";
 
@@ -47,7 +53,10 @@ export interface AgentApi {
   // auth
   me(): Promise<Me>;
   register(input: RegisterInput): Promise<{ message: string }>;
-  login(input: LoginInput): Promise<Me>;
+  /** Returns `Me` (signed in) or `{mfa_required}` — then call verifyMfa with the second-step code. */
+  login(input: LoginInput): Promise<LoginResult>;
+  /** Second sign-in step: a 6-digit authenticator code or a recovery code. */
+  verifyMfa(code: string): Promise<Me>;
   logout(): Promise<void>;
   verifyEmail(token: string): Promise<{ message: string }>;
   /** Generic response whether or not the address has an account. */
@@ -55,6 +64,16 @@ export interface AgentApi {
   forgotPassword(email: string): Promise<{ message: string }>;
   resetPassword(token: string, password: string): Promise<{ message: string }>;
   completeOnboarding(input: OnboardingInput): Promise<Me>;
+
+  // two-step sign-in (own account)
+  mfaStatus(): Promise<MfaStatus>;
+  /** Re-checks the password; returns a new secret + QR code (shown once). */
+  setupMfa(password: string): Promise<MfaSetup>;
+  /** Confirms setup with a current code; returns 10 recovery codes (shown once). */
+  enableMfa(code: string): Promise<RecoveryCodes>;
+  disableMfa(password: string, code: string): Promise<MfaStatus>;
+  /** Replaces all recovery codes; the old ones stop working. */
+  regenerateRecoveryCodes(password: string, code: string): Promise<RecoveryCodes>;
 
   // dashboard & agent
   dashboard(): Promise<Dashboard>;
@@ -99,8 +118,11 @@ export interface AgentApi {
   // integrations
   listIntegrations(): Promise<Integration[]>;
   connectIntegration(key: string): Promise<Integration>;
-  /** WordPress read-only: public REST API, no credentials. Verified by a worker before "connected". */
-  connectWordPress(siteUrl: string): Promise<Integration>;
+  /**
+   * WordPress: read-only through the public REST API, or — with an Application Password
+   * (both fields or neither) — also draft posts. Verified by a worker before "connected".
+   */
+  connectWordPress(siteUrl: string, credentials?: WordPressCredentials): Promise<Integration>;
   disconnectIntegration(key: string): Promise<Integration>;
 
   // reports & activity
@@ -144,6 +166,11 @@ export class ApiError extends Error {
     }
     return out;
   }
+}
+
+/** True when login() needs the second step instead of returning a session. */
+export function isMfaRequired(r: LoginResult): r is MfaRequired {
+  return (r as MfaRequired).mfa_required === true;
 }
 
 export function isApiError(e: unknown): e is ApiError {

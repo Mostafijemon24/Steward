@@ -9,14 +9,21 @@ from typing import Literal
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Public development key (base64 of 32 bytes). Production refuses it.
+DEV_SECRETS_KEY = "c3Rld2FyZC1kZXYtb25seS1rZXktbm90LXNlY3JldCE="
+# Public development X25519 key pair for integration credentials. Production refuses it.
+DEV_INTEGRATION_PRIVATE_KEY = "c3Rld2FyZC1kZXYtb25seS14MjU1MTktcHJpdmF0ZSE="
+DEV_INTEGRATION_PUBLIC_KEY = "U2ryxTxrA+wJNi99g1mknNAWBR87Xb3saP0O3Q1cmA8="
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     env: Literal["development", "test", "production"] = "development"
-    # "api" (default, strictest) or "worker". HTTP-only production checks (SMTP, proxy headers,
-    # https origin, rate limiting) apply to the API; workers never serve HTTP or send mail.
-    process_role: Literal["api", "worker"] = "api"
+    # "api" (default, strictest), "worker" or "migrate". HTTP-only production checks (SMTP, proxy
+    # headers, https origin, rate limiting) and the API's encryption keys apply to the API only;
+    # workers and the one-shot migration job never serve HTTP, send mail or decrypt MFA secrets.
+    process_role: Literal["api", "worker", "migrate"] = "api"
 
     # Runtime connection uses the least-privileged application role.
     database_url: SecretStr = SecretStr("postgresql+psycopg://steward_app:change-me@127.0.0.1:5432/steward")
@@ -36,6 +43,12 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 25 * 1024 * 1024
     workspace_storage_quota_bytes: int = 1024 * 1024 * 1024
     monthly_task_quota: int = 500
+    # Malware scanning: "none" marks files "Not scanned"; "clamav" scans every upload with clamd and
+    # refuses the upload (fail closed) when the scanner cannot give a verdict.
+    malware_scanner: Literal["none", "clamav"] = "none"
+    clamav_host: str = "clamav"
+    clamav_port: int = 3310
+    clamav_timeout_seconds: float = 60.0
 
     # Mail: "outbox" writes .eml files to mail_outbox_dir (development only); "smtp" sends.
     mail_backend: Literal["outbox", "smtp", "disabled"] = "outbox"
@@ -53,6 +66,16 @@ class Settings(BaseSettings):
 
     # Signs approval requests (HMAC). Keep it out of the database; rotate by re-requesting pending approvals.
     approval_signing_key: SecretStr = SecretStr("dev-only-approval-signing-key-change-me")
+
+    # AES-256-GCM key for secrets at rest (MFA seeds, integration credentials): base64 of 32 bytes.
+    # The default is a public development key; production refuses to start with it.
+    secrets_encryption_key: SecretStr = SecretStr(DEV_SECRETS_KEY)
+    secrets_encryption_previous_key: SecretStr | None = None
+    # Integration credentials (WordPress Application Passwords) are sealed to an X25519 public key.
+    # The API gets only the public key (it can encrypt, never decrypt); only the tools worker gets the
+    # private key. Generate both with: python -m app.core.crypto keygen
+    integration_secrets_public_key: str = DEV_INTEGRATION_PUBLIC_KEY
+    integration_secrets_private_key: SecretStr = SecretStr(DEV_INTEGRATION_PRIVATE_KEY)
 
     # Rate limits can be disabled only in tests that are not about rate limiting.
     rate_limit_enabled: bool = True
@@ -107,6 +130,8 @@ class Settings(BaseSettings):
     job_backoff_base_seconds: float = 2.0
     job_backoff_max_seconds: float = 300.0
     worker_concurrency: int = 2
+    # Development/perf testing only: make the mock model take this long per call (mock is refused in production).
+    mock_latency_ms: int = 0
     worker_poll_seconds: float = 1.0
     worker_shutdown_grace_seconds: float = 30.0
 
@@ -145,6 +170,28 @@ class Settings(BaseSettings):
         key = self.approval_signing_key.get_secret_value()
         if len(key) < 32 or any(p in key for p in placeholders):
             problems.append("APPROVAL_SIGNING_KEY must be a random secret of at least 32 characters")
+        enc = self.secrets_encryption_key.get_secret_value()
+        # Only the API and the tools worker receive the key; other workers never decrypt anything
+        # (and app.core.crypto refuses the public development key in production).
+        if self.process_role != "api" and enc == DEV_SECRETS_KEY:
+            pass
+        elif enc == DEV_SECRETS_KEY or any(p in enc for p in placeholders):
+            problems.append("SECRETS_ENCRYPTION_KEY must be set to a random key (openssl rand -base64 32)")
+        else:
+            try:
+                import base64
+
+                if len(base64.b64decode(enc, validate=True)) != 32:
+                    raise ValueError
+            except ValueError:
+                problems.append("SECRETS_ENCRYPTION_KEY must be base64 of exactly 32 bytes (openssl rand -base64 32)")
+        prev = self.secrets_encryption_previous_key
+        if prev is not None and prev.get_secret_value() == DEV_SECRETS_KEY:
+            problems.append("SECRETS_ENCRYPTION_PREVIOUS_KEY must not be the development key")
+        if self.process_role == "api" and self.integration_secrets_public_key == DEV_INTEGRATION_PUBLIC_KEY:
+            problems.append(
+                "INTEGRATION_SECRETS_PUBLIC_KEY must be set (generate a pair: python -m app.core.crypto keygen)"
+            )
         if self.process_role == "api":
             problems.extend(self._http_guards())
         if problems:

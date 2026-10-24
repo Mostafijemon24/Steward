@@ -29,8 +29,9 @@ export function IntegrationsScreen() {
       <div className="flex gap-2.5 rounded-[10px] border border-line bg-surface px-3.5 py-3 text-[13px] text-ink-3">
         <Icon name="key-round" size={15} className="mt-0.5 text-primary" />
         <span>
-          You&apos;ll never be asked to paste passwords or API keys. WordPress (read-only) is the first real integration; others are listed as not built yet.
-          Connecting a tool does not give permission to share every file with it.
+          No passwords or API keys are needed to read. WordPress is the first real integration: read-only by default, and optionally draft posts with a revocable
+          WordPress Application Password (stored encrypted, never shown again). Others are listed as not built yet. Connecting a tool does not give permission to share
+          every file with it.
         </span>
       </div>
 

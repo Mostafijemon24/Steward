@@ -163,6 +163,7 @@ class IntegrationStatus(StrEnum):
 class AuthTokenPurpose(StrEnum):
     verify_email = "verify_email"
     reset_password = "reset_password"  # noqa: S105 - token purpose name, not a secret
+    mfa_login = "mfa_login"  # second sign-in step after a correct password
 
 
 class DeletionRequestStatus(StrEnum):

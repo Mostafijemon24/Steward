@@ -19,11 +19,16 @@ export function acceptFromLabels(labels: string[]): string | undefined {
 }
 
 export const SCAN_TEXT: Record<FileItem["scan_status"], string> = {
-  not_configured: "Malware scanning: not configured",
-  pending: "Malware scanning: pending",
-  clean: "Malware scanning: no threats found",
-  infected: "Malware scanning: threat found",
+  not_configured: "Not scanned",
+  pending: "Waiting for the malware scan",
+  clean: "Scanned — no malware found",
+  infected: "Quarantined: malware found — can't be opened",
 };
+
+/** What the scan means for this file. A quarantined file is always shown as malware found. */
+export function scanText(f: Pick<FileItem, "scan_status" | "status">): string {
+  return f.status === "quarantined" ? SCAN_TEXT.infected : SCAN_TEXT[f.scan_status];
+}
 
 export function FileStatusBadge({ status, className }: { status: FileStatus; className?: string }) {
   const m = FILE_STATUS[status];

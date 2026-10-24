@@ -20,10 +20,12 @@ import { useSession, useUi } from "@/lib/session";
 import { TIMEZONES } from "@/lib/labels";
 import { Banner, Button, ErrorState, FieldError, Icon, MonoTag, Select, Skeleton, Switch, TextInput, cx } from "@/components/ui";
 import { AccountDeletionModal, DataExportModal } from "@/features/security/AccountRequestModals";
+import { TwoStepSignInCard } from "@/features/security/TwoStepSignIn";
 
 const TABS = [
   { k: "profile", l: "Profile", icon: "user" },
   { k: "workspace", l: "Workspace", icon: "building-2" },
+  { k: "security", l: "Security", icon: "shield-check" },
   { k: "appearance", l: "Appearance", icon: "palette" },
   { k: "notifications", l: "Notifications", icon: "bell" },
   { k: "ai", l: "AI behaviour", icon: "bot" },
@@ -51,7 +53,7 @@ const AI_RULES: [keyof AiRules, string, string][] = [
 
 const TOOL_PERMS: [keyof ToolPermissions, string][] = [
   ["wp_read", "Read WordPress content"],
-  ["wp_write", "Change WordPress content (not built yet)"],
+  ["wp_write", "WordPress write: create draft posts only (never publishes; each draft needs your approval)"],
   ["browser", "Read web pages on allowed domains (inspection and SEO audit)"],
   ["email", "Send email (not built yet)"],
   ["external", "Allow sending data to an external AI model (each transfer still checked; confidential data asks)"],
@@ -411,6 +413,16 @@ function AccountSection() {
   );
 }
 
+function SecuritySection() {
+  return (
+    <>
+      <H2 className="mb-1.5">Security</H2>
+      <p className="mb-4 text-[13.5px] text-muted">How you sign in to your own account. Workspace privacy rules are on <Link href="/security">Security &amp; Privacy</Link>.</p>
+      <TwoStepSignInCard />
+    </>
+  );
+}
+
 // ------------------------------------------------------------------ page
 export function SettingsPage() {
   const params = useSearchParams();
@@ -441,6 +453,7 @@ export function SettingsPage() {
   else if (tab === "ai") body = <AiSection key="a" s={q.data!} />;
   else if (tab === "usage") body = <UsageSection />;
   else if (tab === "account") body = <AccountSection />;
+  else if (tab === "security") body = <SecuritySection />;
   else if (tab === "billing")
     body = (
       <>

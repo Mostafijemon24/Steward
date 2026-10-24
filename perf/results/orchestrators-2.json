@@ -1,0 +1,1 @@
+{"scenario": "queue_saturation", "submitted": 300, "codes": {"201": 300}, "admission_seconds": 15.8, "planned": 300, "not_planned_within_600s": 0, "client_observed_done_p50_s_from_burst_start": 18.4, "client_observed_done_p95_s_from_burst_start": 18.4, "server_plan_wait_p50_s": 0.84, "server_plan_wait_p95_s": 1.18, "server_plan_wait_p99_s": 1.25, "server_plan_wait_max_s": 1.28}

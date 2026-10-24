@@ -104,7 +104,12 @@ def migration_head() -> str | None:
         return None
 
 
-def readiness() -> tuple[bool, dict[str, str]]:
+def readiness(include_optional: bool = True) -> tuple[bool, dict[str, str]]:
+    """Core checks (database, migrations, storage) plus, for /readyz, optional services (malware scanner).
+
+    The container healthcheck (/healthz) uses core checks only: an optional dependency being down must
+    not mark the API unhealthy (uploads already fail closed on their own when the scanner is down).
+    """
     checks: dict[str, str] = {}
     try:
         with get_engine().connect() as c:
@@ -124,6 +129,11 @@ def readiness() -> tuple[bool, dict[str, str]]:
         checks["storage"] = "ok"
     except OSError:
         checks["storage"] = "unwritable"
+    if include_optional and get_settings().malware_scanner == "clamav":
+        from app.services.files import get_scanner
+
+        scanner = get_scanner()
+        checks["malware_scanner"] = "ok" if getattr(scanner, "ping", lambda: False)() else "unavailable"
     return all(v == "ok" for v in checks.values()), checks
 
 
@@ -170,7 +180,8 @@ def _engine_metrics() -> list[str]:
                 text(
                     "SELECT action, count(*) FROM audit_events WHERE created_at > now() - interval '15 minutes' "
                     "AND action IN ('policy.blocked','authz.denied','authz.role_denied','approval.binding_failed',"
-                    "'auth.login_failed','file.deletion_refused','step.failed','task.finished') GROUP BY action"
+                    "'auth.login_failed','auth.mfa_failed','file.quarantined','file.deletion_refused','step.failed',"
+                    "'task.finished') GROUP BY action"
                 )
             ).tuples():
                 out.append(f'steward_audit_events_15m{{action="{action}"}} {n}')
@@ -207,12 +218,12 @@ def install(app: FastAPI) -> None:
     def livez() -> dict[str, str]:
         return {"status": "ok"}
 
-    def _ready() -> Response:
-        ok, checks = readiness()
+    def _report(include_optional: bool) -> Response:
+        ok, checks = readiness(include_optional)
         return JSONResponse({"status": "ok" if ok else "unavailable", "checks": checks}, status_code=200 if ok else 503)
 
-    app.add_api_route("/readyz", _ready, methods=["GET"], include_in_schema=False)
-    app.add_api_route("/healthz", _ready, methods=["GET"], include_in_schema=False)
+    app.add_api_route("/readyz", lambda: _report(True), methods=["GET"], include_in_schema=False)
+    app.add_api_route("/healthz", lambda: _report(False), methods=["GET"], include_in_schema=False)
 
     @app.get("/metrics", include_in_schema=False)
     def metrics(request: Request) -> Response:

@@ -70,7 +70,7 @@ def test_migrations_upgrade_downgrade_upgrade() -> None:
     run_migrations(url)
     eng = create_engine(url)
     with eng.connect() as c:
-        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006"
+        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0007"
         tables = set(c.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='public'")).scalars())
     eng.dispose()
     assert {"users", "workspaces", "tasks", "audit_events", "deletion_requests", "jobs", "usage_counters"} <= tables
@@ -311,7 +311,12 @@ def test_security_status_is_honest(make_user: Any) -> None:
     )
     assert checks["malware_scan"] == "not_configured" and checks["backups"] == "not_configured"
     assert checks["egress"] == "enforced" and checks["deletion"] == "enforced" and checks["policy_engine"] == "enforced"
-    assert checks["secrets"] == "partial" and checks["audit_log"] == "partial" and checks["sandbox"] == "partial"
+    assert (
+        checks["secrets"] == "enforced"
+        and checks["mfa"] == "partial"
+        and checks["audit_log"] == "partial"
+        and checks["sandbox"] == "partial"
+    )
     assert "No AI model is configured" in s["ai_provider_policy"]
     assert checks["session_cookies"] == "partial"  # no Secure flag outside production
 
@@ -348,6 +353,8 @@ def test_production_config_guards(monkeypatch: Any) -> None:
         "cookie_secure": False,
         "database_url": "postgresql+psycopg://a:Str0ng-Random-Value@db/x",
         "approval_signing_key": "k" * 40,
+        "secrets_encryption_key": "cmFuZG9tLWtleS1mb3ItdGVzdHMtMzItYnl0ZXMhISE=",
+        "integration_secrets_public_key": "cHVibGljLWtleS1mb3ItdGVzdHMtMzItYnl0ZXMhISE=",
     }
     s = Settings(**good)
     assert s.cookie_secure is True
@@ -405,8 +412,20 @@ def test_api_refuses_to_start_with_the_worker_role(monkeypatch: Any) -> None:
     monkeypatch.setenv("PROCESS_ROLE", "worker")
     config.get_settings.cache_clear()
     try:
-        with pytest.raises(RuntimeError, match="PROCESS_ROLE=worker"):
+        with pytest.raises(RuntimeError, match="PROCESS_ROLE=worker cannot serve HTTP"):
             main.create_app()
     finally:
         monkeypatch.delenv("PROCESS_ROLE")
         config.get_settings.cache_clear()
+
+
+def test_migrate_role_needs_no_encryption_keys() -> None:
+    from app.core.config import Settings
+
+    Settings(
+        env="production",
+        process_role="migrate",
+        mail_backend="disabled",
+        database_url="postgresql+psycopg://steward_app:Str0ng-Random-Value@db/x",
+        approval_signing_key="k" * 40,
+    )

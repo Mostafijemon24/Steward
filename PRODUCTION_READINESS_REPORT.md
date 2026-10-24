@@ -1,19 +1,68 @@
-# Production readiness report: Phase 4 (hardening and Hostinger VPS deployment)
+# Production readiness report (Phases 4 and 5)
 
-Date: 2026-10-24 · Branch: `phase-4-production-hardening` (based on `phase-3-agent-engine`) · Version 0.4.0
+Date: 2026-10-24 · Branch: `phase-5-features-and-scaling` · Version 0.5.0
 
 ## Decision
 
-**NO-GO for public production today. GO for a private staging deployment** on a Hostinger VPS
-by the operator, following `docs/DEPLOYMENT.md`, with no real customer data until the blockers in
-§11 are closed.
+**Still NO-GO for public production. GO for a private staging deployment** on a Hostinger VPS by the
+operator (`docs/DEPLOYMENT.md`), with no real customer data until the blockers in §11 are closed.
 
-Why: everything that can be verified without a real server has been verified, including a full
-production-mode rehearsal with backup and restore. But several critical requirements depend on the
-real environment and **have not been verified**: a real domain with a Let's Encrypt certificate,
-real SMTP delivery, the host firewall, a real model provider, and off-site backups. Two measured
-SLOs also fail (queue wait under a burst; brief outage on restart). This report does not claim the
-system is secure. It lists what was tested and what was not.
+Phase 5 closed both SLO failures from Phase 4 and three "not built" items. The remaining blockers are
+all things that need a real server or real third-party accounts, which this environment doesn't have:
+real domain/TLS, SMTP delivery, host firewall, a real model provider, off-site backups, real ClamAV
+signature updates and a real WordPress site. This report does not claim the system is secure; it
+lists what was tested and what was not.
+
+## Phase 5 summary (features and scaling)
+
+| Item | Result | Evidence |
+|---|---|---|
+| Orchestrator replicas | Default 2 (`ORCHESTRATOR_REPLICAS`). Plan wait scales ~linearly: 3 s model, 120-task burst → p95 168 s / 82 s / 39 s with 1 / 2 / 4 | `docs/PERFORMANCE.md` §3a, `perf/results/orchestrators-*.json` |
+| Phase 4 queue "failure" (P4-07) | **Corrected:** a measurement artifact of the load tool's polling. Server-side plan wait p95 = 1.7 s (1 orchestrator, instant model). Tool fixed. | §3a |
+| Two API containers | `api` + `api-2` behind Caddy (health checks, retries), one uvicorn process each | rehearsal |
+| Zero-downtime restart (P4-08) | **Fixed:** `deploy/rolling-restart.sh` under ~125 req/s → 12,285 requests, **0 errors**, longest gap 0.09 s | `docs/PERFORMANCE.md` §3b |
+| Uneven uvicorn load (P4-09) | Addressed: single-process containers, round robin | — |
+| Malware scanning | ClamAV clamd (INSTREAM), fail closed, quarantine; isolated network, read-only, no internet; freshclam separate | 8 tests + real clamd in rehearsal (clean ✓, EICAR quarantined ✓, 20 MB ✓) |
+| MFA | TOTP + recovery codes, encrypted seeds, replay protection, rate limits, re-auth, notifications | 18 tests + browser journey 6/6 + rehearsal through Caddy |
+| WordPress write | Draft posts only, Application Password sealed to the tools worker's public key, approval-bound content and destination, allowlist HTML | 42 tests (fake WordPress); not tested against a real WordPress site |
+
+### Phase 5 findings and fixes
+
+Independent security review (fresh reviewer, findings first) plus the production rehearsal:
+
+| ID | Sev. | Finding | Status |
+|---|---|---|---|
+| P5-R1 | Medium | Draft content filter bypassable with HTML entities (`jav&#x61;script:`, `&colon;`, `data:`) | **Fixed**: parser-based allowlist (entity-aware, like a browser); 18 bypass payloads + 7 safe samples tested |
+| P5-R2 | Medium | clamd on internet + backend networks, reachable from every container, unhardened | **Fixed**: API-only `scan` network, no internet, read-only FS, SETUID/SETGID only; freshclam separate (verified in rehearsal) |
+| P5-R3 | Low | Non-ASCII digits in a code caused a 500 | **Fixed** + test |
+| P5-R4 | Low | Password reset left pending sign-in challenges valid | **Fixed** (reset and MFA-off cancel challenges) + tests |
+| P5-R5 | Low | Approval bound to planned destination; tool used current site URL | **Fixed**: runner re-checks destinations at execution + test |
+| P5-R6 | Low | One key for MFA and WordPress credentials, held by the API | **Fixed**: X25519 sealed box; API has public key only, tools worker the private key; MFA key separate; dev keys refused in production + tests |
+| P5-R7 | Low | ClamAV outage made both API containers unhealthy (also seen in the rehearsal) | **Fixed**: `/healthz` = core checks only; `/readyz` reports the scanner; Caddy uses `/healthz` + test |
+| P5-R8 | Low | clamd could answer "OK" when limits are exceeded | **Fixed**: `deploy/clamav/clamd.conf` (AlertExceedsMax, AlertEncrypted, StreamMaxLength 32M) + test |
+| P5-R9 | Low | Repeated failed second steps unnoticed | **Fixed**: owner e-mailed once after 5 failures in 15 min + test |
+| P5-B1 | High (deploy) | `migrate` refused to start after the keys were split (treated as the API) | **Fixed**: `PROCESS_ROLE=migrate` + test; found in rehearsal |
+| P5-B2 | High (deploy) | Hardened clamd crash-looped after its first restart (image start script chowns the volume) | **Fixed**: run clamd/freshclam directly; verified restart in rehearsal |
+| — | Info | Files uploaded before scanning was enabled are not rescanned; WordPress draft tool not gated by the "external" switch (has its own `wp_write` switch + approval) | Documented |
+
+### Phase 5 checks run (2026-10-24, real results)
+
+| Check | Result |
+|---|---|
+| Backend `uv run pytest -o addopts="" -q` | **496 passed, 1 skipped** (same root-only sandbox skip as before) |
+| ruff / ruff format / mypy (65 files) / bandit -ll / pip-audit / lockfile sync | all clean |
+| Migration 0007 up/down/up + `alembic check` | passed |
+| Web lint / typecheck / vitest | passed; **53 tests** |
+| Web production build + bundle secret scan + `npm audit --omit=dev` | passed; 37 files clean; 0 vulnerabilities |
+| Browser e2e smoke (real backend) | **25/25** |
+| Browser e2e MFA journey (`e2e/mfa.mjs`) | **6/6** |
+| Production rehearsal (Docker, `APP_ENV=production`, Caddy TLS, 2 APIs, 2 orchestrators, real clamd) | all services healthy; MFA, scanning, sealed WordPress credentials verified through Caddy; internal paths 404 (10 variants); only 80/443 public; backup at schema 0007 → restore verify **VERIFIED** |
+| Rolling restart under load | 0 errors / 12,285 requests |
+| Not verifiable here | ClamAV signature download (blocked by sandbox network policy; a local test signature was used), real WordPress, real model, SMTP, real domain/TLS |
+
+---
+
+# Phase 4 report (kept for reference; superseded items are marked)
 
 ## 1. Architecture and services
 
@@ -51,9 +100,9 @@ All findings come from tests or the production rehearsal; nothing comes from spe
 | P4-04 | Medium | DB connection pool exhaustion under load: requests waited 30 s for a connection (p95 30 s, 4.9 % timeouts at 100 VUs) | Step load test | **Fixed**: configurable pool (10+10), 5 s pool timeout returns a fast `503 service_busy` with `Retry-After`, plus a per-process concurrency limit. p95 30,328 ms → 521 ms. Test: `test_database_pool_exhaustion_returns_503_quickly`. |
 | P4-05 | Medium | Prerendered HTML pages were served with `Cache-Control: s-maxage=31536000`, allowing a shared cache or CDN to keep pages for a year (stale after deploys; risky if a page ever becomes user-specific) | Rehearsal edge check | **Fixed**: Caddy forces `no-store` on everything except content-hashed `/_next/static/*`. Re-checked. API responses were already `no-store` (`test_authenticated_api_responses_are_never_cacheable`). |
 | P4-06 | Medium | Anonymous multipart uploads were parsed and spooled (up to 30 MB) before authentication ran | Rehearsal: anonymous upload got a parser error, not 401 | **Fixed**: the middleware returns 401 before reading the body when no session cookie is present. Test: `test_anonymous_multipart_is_refused_before_the_body_is_read`. |
-| P4-07 | Medium | Queue wait SLO fails under a burst: 300 tasks in 17 s → plan wait p95 37 s (target 30 s) with one orchestrator | Queue saturation test | **Open**: scale with `--scale orchestrator=N`. Real model latency will make this worse. |
-| P4-08 | Medium | A single API instance means restarts cause a short outage (2.4 s, 3 % of requests refused during a graceful restart) | Restart-under-load test | **Open**: accepted for 99.5 % availability. Zero-downtime deploys need two API containers behind Caddy. |
-| P4-09 | Low | Uneven load across uvicorn processes (one process did most work) | perf CPU samples | **Open**: documented; scale with single-process containers instead. |
+| P4-07 | — | ~~Queue wait SLO fails under a burst (p95 37 s)~~ | Queue saturation test | **Withdrawn in Phase 5**: measurement artifact of the load tool; server-side p95 1.7 s |
+| P4-08 | Medium | A single API instance means restarts cause a short outage (2.4 s, 3 % refused) | Restart-under-load test | **Fixed in Phase 5** (two API containers + rolling restart: 0 errors) |
+| P4-09 | Low | Uneven load across uvicorn processes | perf CPU samples | **Addressed in Phase 5** (single-process containers) |
 | P4-10 | Low | Caddy advertised HTTP/3 although UDP 443 is not published | Rehearsal headers | **Fixed**: `protocols h1 h2` |
 | P4-11 | Low | Caddy ran as root with default capabilities | `docker inspect` | **Fixed**: `cap_drop ALL` + `NET_BIND_SERVICE`, read-only FS, `no-new-privileges`. Re-tested. |
 | P4-12 | Low | Request metrics are per uvicorn process, so a scrape sees one process | Code review | **Open**: documented in `docs/OPERATIONS.md`; DB-derived metrics are global. |
@@ -92,9 +141,11 @@ in part, or only in a test environment · **Not verified** = needs the real envi
 | Real SMTP delivery | **Not verified** | needs real mailbox |
 | Real model provider (latency, cost, failures) | **Not verified** | only stub/mock; gateway retry/429 logic unit-tested |
 | Deployment on a real VPS | **Not verified** | no VPS access in this environment |
-| Queue wait SLO under burst | **Failed** | P4-07 |
-| Zero-downtime restart | **Failed** (by design today) | P4-08 |
-| Malware scanning, MFA, RLS, VM-grade sandbox, network egress firewall | **Not built** | `SECURITY_AND_PRIVACY.md` |
+| Queue wait SLO under burst | **Verified** (Phase 5, mock model; real model not measured) | §3a of PERFORMANCE.md |
+| Zero-downtime restart | **Verified** (Phase 5 rehearsal: 0 errors) | PERFORMANCE.md §3b |
+| Malware scanning | **Partially verified** (real clamd in rehearsal with a test signature; signature updates not verifiable here) | Phase 5 |
+| MFA | **Verified** (tests, browser e2e, rehearsal) | Phase 5 |
+| RLS, VM-grade sandbox, network egress firewall, workspace-wide MFA requirement | **Not built** | `SECURITY_AND_PRIVACY.md` |
 
 OWASP mapping (summary): ASVS V2/V3 session and auth → verified rows above; V4 access control →
 authz matrix; V5 validation → schema validation and upload sniffing; V7 errors/logging → no stack
@@ -198,23 +249,25 @@ hardening and `no-store` for pages; backup/restore tooling; CI workflow; docs.
 - Not deployed to a real VPS: TLS issuance, SMTP, firewall and DNS are unverified.
 - No network-level egress firewall. Egress control is enforced in the application only.
 - Code sandbox is namespace-based, not VM-grade.
-- No malware scanning; uploaded files are marked `unscanned`.
-- No MFA. Login lockout can be abused to lock a known e-mail out temporarily (accepted risk).
-- Single server: hardware, disk or provider failure means downtime until restore. Restarts cause brief outages.
+- Malware scanning is optional (needs ~1.5 GB RAM); without it uploads are marked `unscanned`.
+- MFA is optional per user (no workspace-wide requirement). Login and second-step limits can be abused to lock a known account out temporarily (accepted risk; owner is notified).
+- Single server: hardware, disk or provider failure means downtime until restore. API restarts are zero-downtime with the rolling script; restarting the web container or the database is not.
 - Audit log can be altered by the schema owner (trigger can be disabled); no hash chain.
 - `'unsafe-inline'` scripts in the web CSP.
 - Model provider behaviour (latency, cost, outages, data handling) is untested with a real provider.
 
 ## 11. Manual actions required before public production (blockers)
 
-1. Deploy to the VPS following `docs/DEPLOYMENT.md` and complete the go-live checklist (§12 there).
+1. Deploy to the VPS following `docs/DEPLOYMENT.md` and complete the go-live checklist (§15 there).
 2. Verify real TLS (Let's Encrypt), the firewall (`ss -tlnp`, ufw, Hostinger panel) and DNS.
 3. Verify SMTP: verification and password-reset e-mails arrive.
 4. Configure and test the chosen model provider (or keep `none`); review its data-processing terms.
 5. Schedule backups, copy them off-site, and run `restore.sh verify` successfully on the server.
 6. Keep CI green; protect the release branch so merges require it.
-7. Decide on the queue SLO: add orchestrator replicas, or accept a longer wait and document it.
+7. Once a real model is configured, measure its latency and set `ORCHESTRATOR_REPLICAS` with the rule in PERFORMANCE.md §3a.
 8. Wire at least the "site down", "worker missing", "backup" and "not ready" alerts to a person.
+9. If you enable malware scanning: confirm freshclam downloaded signatures and the EICAR test file is quarantined (DEPLOYMENT.md §12).
+10. If you enable WordPress drafts: test once against your real site with an Application Password of a non-admin user.
 
 Credentials were never requested or printed during this work. Rehearsal secrets were randomly
 generated in a scratch file outside the repository and are discarded with the rehearsal.

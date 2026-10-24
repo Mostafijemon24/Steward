@@ -4,7 +4,8 @@ This is the reproducible deployment package for one Ubuntu 24.04 VPS (Hostinger 
 **Nothing in this repository deploys automatically.** Every production change is a manual release
 (§9) that starts with a backup.
 
-> Status: the full stack was rehearsed in production mode (`APP_ENV=production`, Caddy TLS, all
+> Status (Phase 5): the full stack — two API containers, two orchestrators, ClamAV — was rehearsed
+> again in production mode. Phase 4: the full stack was rehearsed in production mode (`APP_ENV=production`, Caddy TLS, all
 > production guards on) on a 4 vCPU / 16 GB test machine with `DOMAIN=localhost`, including backup,
 > restore verification and a full destructive restore. **It has not been deployed to a real VPS
 > with a real domain, Let's Encrypt certificate or SMTP server.** Those steps are below and must be
@@ -18,21 +19,22 @@ This is the reproducible deployment package for one Ubuntu 24.04 VPS (Hostinger 
                          Internet
                             │  80/tcp (redirect only), 443/tcp
                  ┌──────────▼──────────┐   host firewall (ufw): only 22, 80, 443 inbound
-                 │ caddy  (edge net)   │   TLS (Let's Encrypt), HSTS, body/time limits,
-                 │                     │   /metrics /readyz /livez /docs → 404
-                 └──────────┬──────────┘
-                            │ http (edge network)
-                 ┌──────────▼──────────┐   127.0.0.1:3000 also bound on the host (SSH tunnel / debugging)
-                 │ web  Next.js        │   serves pages; proxies /api/* to the API
-                 └──────────┬──────────┘
-      ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─ ─ ─ ─ ─ ─ ─ ─  backend network (internal: no internet route)
-                 ┌──────────▼──────────┐
-                 │ api  FastAPI        │── storage volume (/data: private files)
-                 └──────────┬──────────┘
-   ┌──────────────┬─────────┴────┬──────────────┬──────────────┐
-   │ orchestrator │ tools        │ deletion     │ scheduler    │  workers (same image, own DB roles)
-   │ (+ egress)   │ (+ egress)   │              │              │  egress net = outbound only, for the
-   └──────┬───────┴──────┬───────┴──────┬───────┴──────┬───────┘  model provider / allowlisted reads
+                 │ caddy               │   TLS (Let's Encrypt), HSTS, body/time limits,
+                 │                     │   /metrics /readyz /livez /healthz /docs → 404
+                 └───┬─────────────┬───┘
+       pages (edge)  │             │  /api/* (apinet, internal)  round robin + health checks
+                 ┌───▼───┐   ┌─────▼─────┐ ┌───────────┐
+                 │ web   │   │ api       │ │ api-2     │  identical; restarted one at a time
+                 │Next.js│   └─────┬─────┘ └─────┬─────┘  (deploy/rolling-restart.sh)
+                 └───────┘         │  scan (internal)  ┌──────────┐      ┌───────────┐
+                                   ├──────────────────►│ clamav   │◄─vol─┤ freshclam │──► internet
+                                   │                   │ (clamd)  │      │ (updates) │   (egress)
+      ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┼ ─ ─ ─ ─ ─ ─ ─ ─   └──────────┘      └───────────┘
+                     backend (internal: no internet)
+   ┌──────────────┬──────────────┬─┴────────────┬──────────────┐
+   │ orchestrator │ tools        │ deletion     │ scheduler    │  workers (own DB roles)
+   │ ×2 (+egress) │ (+egress)    │              │              │  egress = model provider /
+   └──────┬───────┴──────┬───────┴──────┬───────┴──────┬───────┘  allowlisted sites
           └──────────────┴───────┬──────┴──────────────┘
                        ┌─────────▼─────────┐
                        │ db  PostgreSQL 16 │── db-data volume.  Never published on the host.
@@ -41,13 +43,19 @@ This is the reproducible deployment package for one Ubuntu 24.04 VPS (Hostinger 
 
 | Service | Image | Runs as | Published | Networks | Persistent data |
 |---|---|---|---|---|---|
-| caddy | `caddy:2-alpine` | root, **only** `NET_BIND_SERVICE`, read-only FS | 80, 443 | edge | `caddy-data` (certificates), `caddy-config` |
+| caddy | `caddy:2-alpine` | root, **only** `NET_BIND_SERVICE`, read-only FS | 80, 443 | edge, apinet | `caddy-data`, `caddy-config` |
 | web | built from `web/` | uid 999 `web` | `127.0.0.1:3000` | edge, backend | — |
-| api | built from `api/` | uid 999 `steward`, read-only FS, no capabilities | — | backend | `storage` |
-| migrate | same as api | uid 999 | — | backend | — (one-shot, runs before api) |
-| orchestrator, tools | same as api | uid 999, read-only FS | — | backend, egress | — |
+| api, api-2 | built from `api/` | uid 999, read-only FS, no capabilities | — | backend, apinet, scan | `storage` |
+| migrate | same as api | uid 999 | — | backend | — (one-shot, runs before the APIs) |
+| orchestrator (×`ORCHESTRATOR_REPLICAS`), tools | same as api | uid 999, read-only FS | — | backend, egress | — |
 | deletion, scheduler | same as api | uid 999, read-only FS | — | backend | `storage` (deletion) |
+| clamav (profile `scan`) | `clamav/clamav:1.4` | `clamav` (drops from root; only SETUID/SETGID), read-only FS | — | scan | `clamav-db` |
+| freshclam (profile `scan`) | `clamav/clamav:1.4` | `clamav`, read-only FS | — | egress | `clamav-db` |
 | db | `postgres:16-alpine` | `postgres` | — | backend | `db-data` |
+
+Who holds which key: `SECRETS_ENCRYPTION_KEY` (MFA seeds) and `INTEGRATION_SECRETS_PUBLIC_KEY` → API
+containers only. `INTEGRATION_SECRETS_PRIVATE_KEY` → tools worker only. The migrate job and the other
+workers get no encryption keys. The model API key → orchestrator and tools only.
 
 Database roles (created by `deploy/db/init-roles.sh`, privileges by the migrations):
 `steward_owner` (migrations only), `steward_app` (API: no DDL, no DELETE), `steward_worker`
@@ -55,7 +63,7 @@ Database roles (created by `deploy/db/init-roles.sh`, privileges by the migratio
 
 ## 2. Prerequisites
 
-- Hostinger VPS, **Ubuntu 24.04**, 2 vCPU / 4 GB RAM minimum (e.g. KVM 2); KVM 4 matches the measured
+- Hostinger VPS, **Ubuntu 24.04**, 2 vCPU / 4 GB RAM minimum (e.g. KVM 2) — **8 GB if you enable malware scanning** (ClamAV needs ~1.5 GB); KVM 4 matches the measured
   test machine (docs/PERFORMANCE.md). 40 GB+ disk. Public IPv4.
 - A domain or sub-domain you control (DNS A record).
 - An SMTP mailbox that supports **STARTTLS on port 587** (Hostinger Email, Google Workspace,
@@ -126,6 +134,13 @@ for k in POSTGRES_SUPERUSER_PASSWORD STEWARD_OWNER_PASSWORD STEWARD_APP_PASSWORD
          APPROVAL_SIGNING_KEY METRICS_TOKEN; do
   sed -i "s|^$k=.*|$k=$(gen)|" .env
 done
+# Encryption keys (MFA seeds; integration credentials as an X25519 key pair). Built image needed:
+docker compose build api
+docker compose run --rm --no-deps --entrypoint python api -m app.core.crypto keygen > /tmp/keys.env
+for k in SECRETS_ENCRYPTION_KEY INTEGRATION_SECRETS_PUBLIC_KEY INTEGRATION_SECRETS_PRIVATE_KEY; do
+  v=$(grep "^$k=" /tmp/keys.env | cut -d= -f2-); sed -i "s|^$k=.*|$k=$v|" .env
+done
+shred -u /tmp/keys.env
 grep -c 'replace-me' .env    # must print 0
 ```
 
@@ -149,7 +164,10 @@ Secret handling rules:
 
 - `.env` stays on the server, mode 600, owned by `steward`. It is in `.gitignore`; never commit it.
 - Keep an offline copy of `.env` in your password manager — **backups are useless without the
-  database passwords and `APPROVAL_SIGNING_KEY`**.
+  database passwords, `APPROVAL_SIGNING_KEY` and the three encryption keys** (without them, MFA
+  seeds and WordPress credentials in a restored database can't be read).
+- Rotating `SECRETS_ENCRYPTION_KEY`: move the current value to `SECRETS_ENCRYPTION_PREVIOUS_KEY`,
+  set a new one, release. Rotating the integration key pair means reconnecting WordPress.
 - The model API key is passed only to the orchestrator and tools workers (the API container gets
   an empty value). It never reaches the browser, the model prompt, logs or task output.
 - Rotate a database password: change it in `.env`, then
@@ -165,7 +183,7 @@ the mock model, insecure egress, non-SMTP mail, a non-https origin, rate limitin
 ```bash
 cd /opt/live-agent
 docker compose --profile tls build --pull
-docker compose --profile tls up -d
+docker compose --profile tls up -d                    # add --profile scan for malware scanning (§12)
 docker compose ps        # all services "healthy" (caddy has no healthcheck: "Up")
 ```
 
@@ -192,8 +210,9 @@ Then register in the browser, receive the verification e-mail (this proves SMTP)
   `docker compose exec api python -c "import urllib.request as u;print(u.urlopen('http://localhost:8000/readyz').read().decode())"`
 - Logs: `docker compose logs -f --tail 100 api orchestrator`. Every container uses json-file
   rotation (5 × 10 MB). Caddy access logs are JSON on stdout (same rotation).
-- Graceful shutdown: uvicorn waits up to 25 s for in-flight requests; workers finish or release
-  their job lease. A single API instance means **a restart is a short outage** (measured 2.4 s).
+- Graceful shutdown: uvicorn waits up to 25 s for in-flight requests (`stop_grace_period: 30s`);
+  workers finish or release their job lease. Restart the APIs with `deploy/rolling-restart.sh`
+  (zero errors measured); restarting both at once makes Caddy hold requests for ~10 s.
 
 ## 8. Backups and restore
 
@@ -258,12 +277,17 @@ cd /opt/live-agent
 ./deploy/restore.sh verify /opt/steward-backups/steward-<stamp>   # 2. prove it restores
 git fetch --tags && git checkout v<X.Y.Z>                    # 3. reviewed release only
 docker compose --profile tls build --pull                    # 4. build new images
-docker compose --profile tls up -d                           # 5. migrate runs, then services restart
-docker compose ps && docker compose logs --tail 50 migrate api
+docker compose run --rm migrate                              # 5. migrations (backward compatible!)
+COMPOSE="docker compose" deploy/rolling-restart.sh           # 6. api, then api-2: no downtime
+docker compose --profile tls up -d                           # 7. web, workers, everything else
+docker compose ps && docker compose logs --tail 50 migrate api api-2
 ```
 
-Migrations run automatically in the one-shot `migrate` service as `steward_owner` before the API
-starts. CI checks every migration upgrades, downgrades and upgrades again on an isolated database
+Migrations run in the one-shot `migrate` service as `steward_owner`. Because the two API containers
+are restarted one after the other, old and new code briefly run side by side: a migration must work
+with the previous release (add columns/tables first; remove or rename them in a later release).
+Measured: a rolling restart under ~125 req/s produced 0 errors (docs/PERFORMANCE.md §3b).
+The web container restarts in a few seconds; during that time pages (not API calls) briefly fail. CI checks every migration upgrades, downgrades and upgrades again on an isolated database
 and that models and schema match (`alembic check`).
 
 Rollback:
@@ -298,8 +322,53 @@ security-relevant audit counts. **Nothing is sent off the server by default.**
 | Agent says "No AI model is configured" | `MODEL_PROVIDER` / `MODEL_*` in `.env`, then `docker compose up -d` |
 | Disk full | `docker system df`; prune old images (`docker image prune`); move old backups off-site. **Do not delete volumes.** |
 | Everyone shares one rate limit | `TRUST_PROXY_HEADERS=true` and Caddy in front (the production guard enforces this) |
+| Uploads fail with "malware scanner is not available" | `docker compose ps clamav freshclam`; first start needs freshclam to finish the download; `docker compose logs clamav` |
+| `clamav` keeps restarting right after install | Normal until freshclam has written the first signatures (`docker compose logs freshclam`) |
+| A user can't pass two-step sign-in | Check device clock (codes are time-based, ±30 s); recovery codes; last resort §13 |
+| WordPress shows "refused the username or Application Password" | Application Password revoked or mistyped; user lacks `edit_posts`; reconnect with a new one |
+| API refuses to start: "INTEGRATION_SECRETS_PUBLIC_KEY must be set" / "SECRETS_ENCRYPTION_KEY …" | Generate keys (§5) and put them in `.env` |
 
-## 12. Go-live checklist (operator)
+## 12. Malware scanning (optional, recommended)
+
+```bash
+# .env: MALWARE_SCANNER=clamav      (and at least 8 GB RAM on the VPS)
+docker compose --profile tls --profile scan up -d
+docker compose logs -f freshclam     # first signature download: a few minutes
+docker compose ps clamav             # "healthy" once signatures are loaded
+```
+
+- Every upload is streamed to clamd before it is stored. Infected files are quarantined and can't
+  be opened. If clamd is down or answers with an error, uploads are **refused** (503), never
+  accepted unscanned. Content clamd could not fully inspect (archive limits, encrypted Office
+  files) is reported as found and quarantined (`deploy/clamav/clamd.conf`).
+- clamd is reachable only from the API containers and has no internet access; freshclam is the
+  only ClamAV process on the egress network.
+- Files uploaded before scanning was enabled stay "Not scanned"; they are not rescanned.
+- Test it with the standard EICAR test string (harmless): upload a text file containing it; it
+  must show as quarantined.
+
+## 13. Two-step sign-in (MFA) — operator notes
+
+- Users turn it on in **Settings → Security**. It is optional per user (no workspace-wide
+  requirement yet).
+- A user who lost both their phone and their recovery codes can't sign in. After verifying their
+  identity out of band, an operator can switch it off (this is audited only by you — note it):
+  `docker compose exec db psql -U postgres -d steward -c "UPDATE user_mfa SET enabled_at = NULL, secret_enc = NULL, last_used_step = NULL WHERE user_id = (SELECT id FROM users WHERE email = 'user@example.com')"`
+  and tell the user to turn it on again.
+- Repeated failed second steps e-mail the account owner (the password is probably known).
+
+## 14. WordPress draft posts (optional)
+
+- In WordPress: **Users → Profile → Application Passwords**, create one for "Steward" with a user
+  that may create posts (Author or Editor role is enough; avoid Administrator).
+- In Steward: Integrations → WordPress → site address + "Also allow draft posts" (username +
+  Application Password), and switch on **Settings → Tool permissions → WordPress write**.
+- The agent can only create **drafts**; each one needs an approval of the exact title and text,
+  and it is refused if the destination changed since approval. You publish it yourself in WordPress.
+- Revoke access any time in WordPress (delete the Application Password) or with Disconnect in
+  Steward (wipes the stored credential).
+
+## 15. Go-live checklist (operator)
 
 - [ ] DNS resolves to the VPS; HTTPS certificate issued by Let's Encrypt (browser shows a valid lock)
 - [ ] `curl -sI https://<domain>/login` shows HSTS and `cache-control: no-store`
@@ -311,3 +380,6 @@ security-relevant audit counts. **Nothing is sent off the server by default.**
 - [ ] First backup taken, copied off-site, and `restore.sh verify` → VERIFIED
 - [ ] `.env` and the backup private key stored in a password manager, not on the server
 - [ ] Alerts from docs/OPERATIONS.md wired to someone who will act on them
+- [ ] If malware scanning is on: `docker compose ps clamav` healthy and the EICAR test file is quarantined
+- [ ] Encryption keys stored in the password manager together with `.env`
+- [ ] A rolling restart (`deploy/rolling-restart.sh`) completed without errors

@@ -229,7 +229,7 @@ export function OnboardingScreen() {
               <StepTitle title="Connect tools later">
                 {DEMO_MODE
                   ? "Connections need a secure backend flow, so none can be set up in this prototype. You'll never be asked to paste a password or API key into chat."
-                  : "WordPress (read-only, no credentials) can be connected from the Integrations page after setup. Other integrations are not built yet. You'll never be asked to paste a password or API key into chat."}
+                  : "WordPress (read-only without credentials; optionally draft posts with a WordPress Application Password) can be connected from the Integrations page after setup. Other integrations are not built yet. You'll never be asked to paste a password or API key into chat."}
               </StepTitle>
               {integrations.isLoading ? (
                 <Skeleton lines={4} />

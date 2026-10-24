@@ -114,11 +114,21 @@ def list_integrations(ctx: Context) -> list[S.IntegrationOut]:
             description = info.data_disclosure
             destination = f"{info.label} ({info.location})" if info.configured else "None configured"
         if key == "wordpress":
-            scopes = [
-                "Read published pages and posts (public REST API)",
-                "No credentials stored",
-                "No changes to your site",
-            ]
+            write = bool(r and (r.config or {}).get("mode") == "read_write_drafts")
+            scopes = (
+                [
+                    "Read published pages and posts (public REST API)",
+                    "Create DRAFT posts only — never publishes, edits or deletes",
+                    "Every draft needs your one-time approval of the exact text",
+                    "Application Password stored encrypted; revoke it any time in WordPress",
+                ]
+                if write
+                else [
+                    "Read published pages and posts (public REST API)",
+                    "No credentials stored",
+                    "No changes to your site",
+                ]
+            )
         last = "Never" if not r or not r.last_activity_at else r.last_activity_at.strftime("%b %d, %H:%M UTC")
         out.append(
             S.IntegrationOut(
@@ -135,6 +145,7 @@ def list_integrations(ctx: Context) -> list[S.IntegrationOut]:
                 mode=str(meta["mode"]),
                 site_url=str((r.config or {}).get("site_url")) if r and (r.config or {}).get("site_url") else None,
                 error_message=r.error_message if r else None,
+                write_access=bool(key == "wordpress" and r and (r.config or {}).get("mode") == "read_write_drafts"),
             )
         )
     return out
@@ -181,6 +192,9 @@ def disconnect_integration(ctx: Context, key: str) -> S.IntegrationOut:
     r.status = IntegrationStatus.not_connected.value
     r.granted_scopes = []
     r.config = {}
+    from app.services.agent import revoke_integration_secret
+
+    revoke_integration_secret(ctx, key)  # stored credentials are wiped (cannot be restored)
     r.error_message = None
     r.updated_at = utcnow()
     ctx.log("integration.disconnected", "integration", f"{key} disconnected", target_type="integration", target_id=key)
@@ -590,9 +604,9 @@ def security_status(ctx: Context) -> S.SecurityStatusOut:
         S.SecurityCheckOut(
             key="secrets",
             label="Secrets kept server-side",
-            status="partial",
+            status="enforced",
             detail="The AI provider key lives only in server environment variables and is never sent to the browser, the model or logs. "
-            "No integration credentials are collected (WordPress uses its public read-only API). Encrypted per-workspace secret storage is not built yet.",
+            "Integration credentials (WordPress Application Passwords) are stored AES-256-GCM encrypted with a key kept only in the server environment. The API can store them but never read them back; only the tools worker decrypts them, right before a call.",
         ),
         S.SecurityCheckOut(
             key="backups",
@@ -634,10 +648,22 @@ def security_status(ctx: Context) -> S.SecurityStatusOut:
             detail=sandbox_reason,
         ),
         S.SecurityCheckOut(
+            key="mfa",
+            label="Two-step sign-in",
+            status="partial",
+            detail="Available for every account (authenticator app + single-use recovery codes) in Settings → Security. "
+            "It is optional per user; a workspace-wide requirement is not built yet.",
+        ),
+        S.SecurityCheckOut(
             key="malware_scan",
             label="Malware scanning for uploads",
-            status="not_configured",
-            detail="Files are type-checked and stored privately, but marked 'Not scanned' until a scanner is connected.",
+            status="enforced" if settings.malware_scanner == "clamav" else "not_configured",
+            detail=(
+                "Every upload is scanned by ClamAV before it is stored. Infected files are quarantined and can't be "
+                "opened; if the scanner is unavailable, uploads are refused rather than accepted unscanned."
+                if settings.malware_scanner == "clamav"
+                else "Files are type-checked and stored privately, but marked 'Not scanned' until a scanner is connected."
+            ),
         ),
     ]
     return S.SecurityStatusOut(

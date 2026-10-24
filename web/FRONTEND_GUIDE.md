@@ -23,5 +23,5 @@ App (inside `app/(app)/`, wrapped by `AppShell`): `/overview` · `/tasks/new` ·
 Task "open" rule (prototype `dec().open`): status `awaiting_approval` or `planning` → `/tasks/[id]/plan`, else `/tasks/[id]`.
 
 ## Query keys (keep consistent so invalidation works)
-`["me"]`, `["dashboard"]`, `["upload-limits"]`, `["tasks", query]`, `["task", id]`, `["task-events", id]`, `["approvals", filter]`, `["approval", id]`, `["files", query]`, `["file", id]`, `["automations"]`, `["integrations"]`, `["reports"]`, `["activity", type]`, `["notifications", filter]`, `["security"]`, `["settings"]`, `["usage"]`.
+`["me"]`, `["mfa"]`, `["dashboard"]`, `["upload-limits"]`, `["tasks", query]`, `["task", id]`, `["task-events", id]`, `["approvals", filter]`, `["approval", id]`, `["files", query]`, `["file", id]`, `["automations"]`, `["integrations"]`, `["reports"]`, `["activity", type]`, `["notifications", filter]`, `["security"]`, `["settings"]`, `["usage"]`.
 After any mutation, invalidate the affected keys **and** `["dashboard"]` (sidebar badge, unread count, setup progress read from it).

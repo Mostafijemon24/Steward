@@ -28,11 +28,15 @@ import type {
   Integration,
   IntegrationStatus,
   LoginInput,
+  LoginResult,
   Me,
+  MfaSetup,
+  MfaStatus,
   NotificationItem,
   OnboardingInput,
   Page,
   PreferencesInput,
+  RecoveryCodes,
   RegisterInput,
   RiskLevel,
   SecurityStatus,
@@ -54,6 +58,7 @@ import type {
   Usage,
   User,
   WaitingFor,
+  WordPressCredentials,
   WorkspaceSettingsInput,
   EventLevel,
 } from "./types";
@@ -278,7 +283,42 @@ interface DemoState {
   notifications: NotificationItem[];
   settings: Settings;
   idempotency: Map<string, string>;
+  mfa: DemoMfa;
 }
+
+/**
+ * Demo two-step sign-in, kept in this tab's memory only (resets on reload).
+ * There is no real authenticator: the demo accepts the code 123456 (the UI says so)
+ * or one of the recovery codes it generated. Each recovery code works once.
+ */
+interface DemoMfa {
+  enabled: boolean;
+  pendingSecret: string | null;
+  enabledAt: string | null;
+  recoveryCodes: string[]; // normalised (no dashes), unused ones only
+  challengeUntil: number | null; // pending second sign-in step (like the server's 5-minute cookie)
+}
+const DEMO_TOTP = "123456";
+const MFA_CHALLENGE_MS = 5 * MIN;
+
+function randomChars(n: number, alphabet: string): string {
+  const bytes = new Uint8Array(n);
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(bytes);
+  else for (let i = 0; i < n; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+const normCode = (c: string) => c.replace(/[\s-]/g, "").toLowerCase();
+const fmtRecovery = (c: string) => `${c.slice(0, 4)}-${c.slice(4, 8)}-${c.slice(8, 12)}`;
+
+/** A clearly-labelled placeholder picture — not a scannable QR code. */
+const DEMO_QR_SVG =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180">' +
+      '<rect width="180" height="180" fill="#fff"/><rect x="6" y="6" width="168" height="168" fill="none" stroke="#98A2B3" stroke-width="2" stroke-dasharray="6 5"/>' +
+      '<text x="90" y="82" text-anchor="middle" font-family="monospace" font-size="18" fill="#475467">DEMO</text>' +
+      '<text x="90" y="106" text-anchor="middle" font-family="monospace" font-size="11" fill="#667085">not a real QR code</text></svg>',
+  );
 
 function readSignedIn(): boolean {
   try {
@@ -399,6 +439,7 @@ function seed(): DemoState {
     scopes: [...i.scopes],
     connectable: i.id === "wordpress",
     operational: i.id === "wordpress",
+    write_access: false,
     mode: i.id === "wordpress" ? "read-only (public REST API, no credentials) — demo sandbox" : "not built",
     site_url: null,
     error_message: null,
@@ -470,6 +511,7 @@ function seed(): DemoState {
     notifications,
     settings,
     idempotency: new Map(),
+    mfa: { enabled: false, pendingSecret: null, enabledAt: null, recoveryCodes: [], challengeUntil: null },
   };
 }
 
@@ -732,7 +774,7 @@ const DEMO_TOOLS: AgentTool[] = [
   { id: "files.analyze", label: "Analyse an attached file", description: "Counts rows, columns, empty cells and frequent values.", impact: "none", risk: "read_only", available: true, unavailable_reason: null },
   { id: "seo.audit", label: "SEO audit of a page (read-only)", description: "Checks one page on an allowed domain.", impact: "external_read", risk: "read_only", available: true, unavailable_reason: null },
   { id: "report.write", label: "Write a report", description: "Writes a markdown report into the workspace.", impact: "workspace_write", risk: "workspace_only", available: true, unavailable_reason: null },
-  { id: "wordpress.write", label: "WordPress: change content", description: "Not built yet.", impact: "production_change", risk: "production_change", available: false, unavailable_reason: "Not built yet." },
+  { id: "wordpress.create_draft", label: "WordPress: create a draft post", description: "Creates a DRAFT post (never publishes, edits or deletes). Needs write access and a one-time approval of the exact text. Demo: nothing is sent.", impact: "production_change", risk: "production_change", available: true, unavailable_reason: null },
 ];
 
 export class MockAgentApi implements AgentApi {
@@ -773,7 +815,7 @@ export class MockAgentApi implements AgentApi {
     return { message: "Demo workspace created in this browser tab. No email was sent — verify from the next screen to continue." };
   }
 
-  async login(input: LoginInput): Promise<Me> {
+  async login(input: LoginInput): Promise<LoginResult> {
     await authLatency();
     if (!emailOk(input.email ?? "")) throw invalid("Enter a valid email address.", "email");
     if (!input.password) throw invalid("Enter your password.", "password");
@@ -781,12 +823,117 @@ export class MockAgentApi implements AgentApi {
       throw new ApiError(401, "invalid_credentials", "That email and password combination did not match. Check both and try again. (Demo error state.)");
     }
     const s = db();
+    if (s.mfa.enabled) {
+      // Same shape as the server: no session yet, only a short-lived challenge.
+      s.signedIn = false;
+      writeSignedIn(false);
+      s.mfa.challengeUntil = Date.now() + MFA_CHALLENGE_MS;
+      return { mfa_required: true, methods: ["totp", "recovery_code"] };
+    }
     s.user = { ...s.user, email: input.email.trim() };
     s.settings.profile.email = s.user.email;
     s.signedIn = true;
     writeSignedIn(true);
     addActivity("auth", "auth.login", "Signed in to the demo workspace (not real authentication)");
     return this.me_();
+  }
+
+  async verifyMfa(code: string): Promise<Me> {
+    await authLatency();
+    const s = db();
+    const m = s.mfa;
+    if (!m.enabled || !m.challengeUntil || Date.now() > m.challengeUntil) {
+      m.challengeUntil = null;
+      throw new ApiError(401, "mfa_challenge_expired", "This sign-in attempt has expired. Enter your email and password again.");
+    }
+    if (!this.mfaCodeOk(code, true)) {
+      throw new ApiError(401, "invalid_code", "That code didn't work. Check it and try again. (Demo: use 123456 or one of your recovery codes.)");
+    }
+    m.challengeUntil = null;
+    s.signedIn = true;
+    writeSignedIn(true);
+    addActivity("auth", "auth.login", "Signed in to the demo workspace with two-step sign-in (not real authentication)");
+    return this.me_();
+  }
+
+  /** Demo check: 123456 stands in for an authenticator code; a recovery code is used up. */
+  private mfaCodeOk(code: string, allowRecovery: boolean): boolean {
+    const c = normCode(code ?? "");
+    if (c === DEMO_TOTP) return true;
+    const m = db().mfa;
+    const idx = allowRecovery ? m.recoveryCodes.indexOf(c) : -1;
+    if (idx === -1) return false;
+    m.recoveryCodes.splice(idx, 1);
+    return true;
+  }
+
+  private demoPassword(password: string) {
+    if (!password) throw invalid("Enter your password.", "password");
+    if (password === "error") throw new ApiError(401, "invalid_password", "That password isn't right. (Demo: any password except \"error\" works.)");
+  }
+
+  private newRecoveryCodes(): string[] {
+    const codes = Array.from({ length: 10 }, () => randomChars(12, "abcdefghijkmnpqrstuvwxyz23456789"));
+    db().mfa.recoveryCodes = codes;
+    return codes.map(fmtRecovery);
+  }
+
+  private mfaStatus_(): MfaStatus {
+    const m = db().mfa;
+    return { enabled: m.enabled, pending_setup: !m.enabled && !!m.pendingSecret, enabled_at: m.enabledAt, recovery_codes_remaining: m.enabled ? m.recoveryCodes.length : 0 };
+  }
+
+  async mfaStatus(): Promise<MfaStatus> {
+    await latency();
+    this.requireAuth();
+    return this.mfaStatus_();
+  }
+
+  async setupMfa(password: string): Promise<MfaSetup> {
+    await authLatency();
+    const s = this.requireAuth();
+    this.demoPassword(password);
+    if (s.mfa.enabled) throw conflict("mfa_already_enabled", "Two-step sign-in is already on.");
+    const secret = randomChars(32, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567");
+    s.mfa.pendingSecret = secret;
+    return {
+      secret,
+      otpauth_uri: `otpauth://totp/Steward%20(demo):${encodeURIComponent(s.user.email)}?secret=${secret}&issuer=Steward%20(demo)`,
+      qr_svg_data_uri: DEMO_QR_SVG,
+    };
+  }
+
+  async enableMfa(code: string): Promise<RecoveryCodes> {
+    await authLatency();
+    const s = this.requireAuth();
+    if (s.mfa.enabled || !s.mfa.pendingSecret) throw conflict("mfa_not_set_up", "Start the setup again: there is no pending two-step setup.");
+    if (!this.mfaCodeOk(code, false)) throw new ApiError(400, "invalid_code", "That code didn't work. (Demo: enter 123456.)");
+    s.mfa = { ...s.mfa, enabled: true, pendingSecret: null, enabledAt: nowIso() };
+    const codes = this.newRecoveryCodes();
+    addActivity("security", "auth.mfa_enabled", "Two-step sign-in turned on (demo — kept in this tab only)");
+    return { recovery_codes: codes, message: "Two-step sign-in is on for this demo tab. Nothing was stored on a server." };
+  }
+
+  async disableMfa(password: string, code: string): Promise<MfaStatus> {
+    await authLatency();
+    const s = this.requireAuth();
+    this.demoPassword(password);
+    if (!s.mfa.enabled) throw conflict("mfa_not_enabled", "Two-step sign-in is already off.");
+    if (!this.mfaCodeOk(code, true)) throw new ApiError(400, "invalid_code", "That code didn't work. (Demo: use 123456 or a recovery code.)");
+    s.mfa = { enabled: false, pendingSecret: null, enabledAt: null, recoveryCodes: [], challengeUntil: null };
+    addActivity("security", "auth.mfa_disabled", "Two-step sign-in turned off (demo)");
+    return this.mfaStatus_();
+  }
+
+  async regenerateRecoveryCodes(password: string, code: string): Promise<RecoveryCodes> {
+    await authLatency();
+    const s = this.requireAuth();
+    this.demoPassword(password);
+    if (!s.mfa.enabled) throw conflict("mfa_not_enabled", "Turn on two-step sign-in first.");
+    if (!this.mfaCodeOk(code, true)) throw new ApiError(400, "invalid_code", "That code didn't work. (Demo: use 123456 or a recovery code.)");
+    const codes = this.newRecoveryCodes();
+    addActivity("security", "auth.mfa_recovery_codes", "New recovery codes created; the old ones stopped working (demo)");
+    return { recovery_codes: codes, message: "New recovery codes created. The old ones no longer work." };
   }
 
   async logout(): Promise<void> {
@@ -1327,12 +1474,21 @@ export class MockAgentApi implements AgentApi {
     );
   }
 
-  async connectWordPress(siteUrl: string): Promise<Integration> {
+  async connectWordPress(siteUrl: string, credentials?: WordPressCredentials): Promise<Integration> {
     await latency();
     const s = this.requireAuth();
     const i = s.integrations.find((x) => x.key === "wordpress");
     if (!i) throw notFound();
     if (!/^https:\/\/[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(siteUrl.trim())) throw invalid("Enter the site's https:// address, like https://example.com", "site_url");
+    // Same rules as the server. The password is checked and then dropped: the demo never keeps it.
+    const user = credentials?.username?.trim() ?? "";
+    const pw = credentials?.application_password?.trim() ?? "";
+    if (!!user !== !!pw) throw invalid("Enter both the WordPress username and the Application Password, or neither.", user ? "application_password" : "username");
+    if (pw && (pw.length < 16 || pw.length > 100 || /[\r\n\t]/.test(pw))) throw invalid("Paste the Application Password exactly as WordPress shows it.", "application_password");
+    const write = !!pw;
+    i.write_access = write;
+    i.scopes = ["Read published pages and posts (public REST API)", ...(write ? ["Create draft posts (never publishes, edits or deletes; each draft needs your approval)"] : [])];
+    i.mode = write ? "read + draft posts — demo sandbox (the password was not stored)" : "read-only (public REST API, no credentials) — demo sandbox";
     i.status = "demo";
     i.site_url = siteUrl.trim().replace(/\/$/, "");
     i.error_message = null;
@@ -1348,6 +1504,7 @@ export class MockAgentApi implements AgentApi {
     if (!i) throw notFound();
     if (i.status !== "demo" && i.status !== "connected") throw conflict("integration_not_connected", `${i.name} isn't connected, so there is nothing to disconnect.`);
     i.status = "not_connected";
+    i.write_access = false;
     i.last_activity = "Disconnected " + stampText();
     addActivity("integration", "integration.disconnected", `${i.name} demo connection removed`);
     return clone(i);

@@ -23,6 +23,9 @@ x-api-env: &api-env
   SMTP_USERNAME: ${SMTP_USERNAME:-}
   SMTP_PASSWORD: ${SMTP_PASSWORD:-}
   DELETION_RETENTION_DAYS: ${DELETION_RETENTION_DAYS:-30}
+  # Malware scanning: "clamav" needs the `scan` profile (clamd); uploads are refused if it is down.
+  MALWARE_SCANNER: ${MALWARE_SCANNER:-none}
+  CLAMAV_HOST: clamav
 
 # Model provider: read by the API (to describe it) and the orchestrator/tools workers (to call it).
 # The key never reaches the browser, the model, logs or task output.
@@ -96,6 +99,7 @@ services:
     environment:
       <<: *api-env
       MIGRATION_DATABASE_URL: postgresql+psycopg://steward_owner:${STEWARD_OWNER_PASSWORD}@db:5432/steward
+      PROCESS_ROLE: migrate  # no HTTP, no encryption keys
     networks: [backend]
     depends_on:
       db:
@@ -103,7 +107,9 @@ services:
     restart: "no"
     logging: *logging
 
-  api:
+  # Two identical API containers behind Caddy: one can restart while the other serves
+  # (deploy/rolling-restart.sh). Rate limits, sessions and the queue live in PostgreSQL.
+  api: &api-service
     build: ./api
     restart: unless-stopped
     logging: *logging
@@ -112,26 +118,37 @@ services:
       MODEL_API_KEY: ""  # the API only describes the provider; it never calls it
       # Bearer token for /metrics (internal network only; Caddy never serves it). Empty = disabled.
       METRICS_TOKEN: ${METRICS_TOKEN:-}
-      # Per uvicorn process: keep API_PROCESSES * (DB_POOL_SIZE + DB_MAX_OVERFLOW) well below
+      # Per container: keep containers * API_PROCESSES * (DB_POOL_SIZE + DB_MAX_OVERFLOW) well below
       # Postgres max_connections (100) minus workers and maintenance (see docs/PERFORMANCE.md).
-      API_PROCESSES: ${API_PROCESSES:-2}
+      API_PROCESSES: ${API_PROCESSES:-1}
       API_MAX_CONCURRENCY: ${API_MAX_CONCURRENCY:-80}
       DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
       DB_POOL_TIMEOUT_SECONDS: ${DB_POOL_TIMEOUT_SECONDS:-5}
+      # MFA seeds (AES-256-GCM): only the API containers hold this key.
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?set SECRETS_ENCRYPTION_KEY (python -m app.core.crypto keygen)}
+      # Integration credentials are sealed to this public key; the API can encrypt but never decrypt.
+      INTEGRATION_SECRETS_PUBLIC_KEY: ${INTEGRATION_SECRETS_PUBLIC_KEY:?set INTEGRATION_SECRETS_PUBLIC_KEY (python -m app.core.crypto keygen)}
     <<: *hardening
-    networks: [backend]
+    # uvicorn finishes in-flight requests for up to 25 s on SIGTERM; give it that time.
+    stop_grace_period: 30s
+    networks: [backend, apinet, scan]
     volumes:
       - storage:/data
     depends_on:
       migrate:
         condition: service_completed_successfully
 
+  api-2: *api-service
+
   # ---- agent engine workers (same image, separate processes and database roles)
   orchestrator:
     build: ./api
     command: ["python", "-m", "app.workers", "orchestrator"]
     restart: unless-stopped
+    # Several orchestrators share the queue safely (jobs are claimed with SKIP LOCKED).
+    deploy:
+      replicas: ${ORCHESTRATOR_REPLICAS:-2}
     logging: *logging
     healthcheck: *worker-health
     environment:
@@ -154,6 +171,8 @@ services:
       # It then reports itself unavailable and code steps are blocked (fails closed). Do not
       # disable seccomp to enable it; use gVisor (runtime: runsc) or a dedicated sandbox host.
       SANDBOX_ENABLED: ${SANDBOX_ENABLED:-true}
+      # Only the tools worker can decrypt integration credentials (WordPress drafts).
+      INTEGRATION_SECRETS_PRIVATE_KEY: ${INTEGRATION_SECRETS_PRIVATE_KEY:?set INTEGRATION_SECRETS_PRIVATE_KEY (python -m app.core.crypto keygen)}
     <<: *hardening
     mem_limit: 1g
     cpus: 1.0
@@ -229,7 +248,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    networks: [edge]
+    networks: [edge, apinet]  # apinet: Caddy → API containers only (no route to db or workers)
     # Runs as root inside the container only to bind 80/443; every other capability is dropped.
     read_only: true
     tmpfs: ["/tmp"]
@@ -243,9 +262,62 @@ services:
     depends_on:
       - web
 
+  # Optional malware scanning (profile "scan"; set MALWARE_SCANNER=clamav). clamd parses untrusted
+  # uploads, so it is isolated: only the API containers can reach it (internal "scan" network), it
+  # has no internet access, a read-only filesystem and only the capabilities it needs to drop to its
+  # own user. Signature updates run in a separate freshclam container (the only one on egress).
+  clamav:
+    image: clamav/clamav:1.4
+    profiles: ["scan"]
+    # Run clamd directly (not the image's /init, which chowns the volume as root and fails once
+    # clamd has created its private temp folders there). clamd drops to the clamav user itself.
+    entrypoint: ["clamd", "--foreground=yes"]
+    init: true
+    restart: unless-stopped        # restarts until freshclam has downloaded the first signatures
+    logging: *logging
+    networks: [scan]
+    volumes:
+      - clamav-db:/var/lib/clamav
+      - ./deploy/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+    read_only: true
+    # /run/clamav pre-created for the clamav user (uid 100) so no extra capability is needed.
+    tmpfs: ["/tmp", "/run/clamav:uid=100,gid=101,mode=775"]
+    cap_drop: ["ALL"]
+    cap_add: ["SETUID", "SETGID"]  # only to drop from root to the clamav user
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 600s  # the first signature download takes several minutes
+
+  freshclam:
+    image: clamav/clamav:1.4
+    profiles: ["scan"]
+    entrypoint: ["freshclam", "--daemon", "--foreground=yes"]
+    init: true
+    restart: unless-stopped
+    logging: *logging
+    networks: [egress]
+    volumes:
+      - clamav-db:/var/lib/clamav
+      - ./deploy/clamav/freshclam.conf:/etc/clamav/freshclam.conf:ro
+    read_only: true
+    tmpfs: ["/tmp", "/run/clamav:uid=100,gid=101,mode=775"]
+    cap_drop: ["ALL"]
+    cap_add: ["SETUID", "SETGID"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+
 networks:
   backend:
     internal: true  # no route to the internet
+  apinet:
+    internal: true  # Caddy ↔ API containers only
+  scan:
+    internal: true  # API containers ↔ clamd only
   edge: {}
   egress: {}
 
@@ -254,3 +326,4 @@ volumes:
   storage:
   caddy-data:
   caddy-config:
+  clamav-db:

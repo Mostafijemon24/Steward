@@ -10,7 +10,8 @@ from typing import BinaryIO
 from sqlalchemy import func, select
 
 from app import schemas as S
-from app.adapters.phase2 import scanner
+from app.adapters.clamav import ClamdScanner, ScannerUnavailable
+from app.adapters.phase2 import NotConfiguredScanner
 from app.adapters.storage import ALLOWED, LocalPrivateFileStorage, detect_type, safe_display_name, validate_stored
 from app.core.config import get_settings
 from app.core.db import utcnow
@@ -27,6 +28,13 @@ COLLECTIONS = ["Website audits", "SEO & content", "Research", "Support data", "C
 @lru_cache
 def storage() -> LocalPrivateFileStorage:
     return LocalPrivateFileStorage(get_settings().storage_dir)
+
+
+def get_scanner() -> ClamdScanner | NotConfiguredScanner:
+    s = get_settings()
+    if s.malware_scanner == "clamav":
+        return ClamdScanner(s.clamav_host, s.clamav_port, s.clamav_timeout_seconds, lambda key: storage().open(key))
+    return NotConfiguredScanner()
 
 
 def limits() -> S.UploadLimitsOut:
@@ -75,7 +83,23 @@ def upload(ctx: Context, stream: BinaryIO, filename: str, collection: str) -> S.
         reason = validate_stored(storage().local_path(stored.key), label)
         if reason is not None:
             raise ApiError(415, "unsupported_file_type", f"This file was refused: it {reason}.")
-        scan_status = scanner.scan(stored.key) if scanner.is_configured() else ScanStatus.not_configured.value
+        scanner = get_scanner()
+        signature: str | None = None
+        if scanner.is_configured():
+            try:
+                scan_status = scanner.scan(stored.key)
+            except ScannerUnavailable:
+                # Fail closed: a configured scanner that cannot answer means the file is refused.
+                raise ApiError(
+                    503,
+                    "scanner_unavailable",
+                    "The malware scanner is not available right now, so the file was not accepted. "
+                    "Please try again in a few minutes.",
+                    headers={"Retry-After": "30"},
+                ) from None
+            signature = getattr(scanner, "last_signature", None)
+        else:
+            scan_status = ScanStatus.not_configured.value
         status = (
             FileStatus.unscanned.value if scan_status == ScanStatus.not_configured.value else FileStatus.ready.value
         )
@@ -100,14 +124,29 @@ def upload(ctx: Context, stream: BinaryIO, filename: str, collection: str) -> S.
         ctx.db.flush()
         bump_usage(ctx.db, ctx.workspace.id, "storage_bytes", stored.size_bytes, period="all")
         bump_usage(ctx.db, ctx.workspace.id, "files_uploaded", 1)
-        ctx.log(
-            "file.uploaded",
-            "file",
-            f"{f.original_name} uploaded to private storage (not scanned — scanner not configured)",
-            target_type="file",
-            target_id=str(f.id),
-            metadata={"type": label, "size_bytes": stored.size_bytes},
-        )
+        if scan_status == ScanStatus.infected.value:
+            ctx.log(
+                "file.quarantined",
+                "file",
+                f"{f.original_name} was quarantined: the malware scanner found {signature or 'a threat'}",
+                target_type="file",
+                target_id=str(f.id),
+                metadata={"type": label, "size_bytes": stored.size_bytes, "signature": signature},
+            )
+        else:
+            scanned = (
+                "scanned, no malware found"
+                if scan_status == ScanStatus.clean.value
+                else ("not scanned — scanner not configured")
+            )
+            ctx.log(
+                "file.uploaded",
+                "file",
+                f"{f.original_name} uploaded to private storage ({scanned})",
+                target_type="file",
+                target_id=str(f.id),
+                metadata={"type": label, "size_bytes": stored.size_bytes, "scan": scan_status},
+            )
         ctx.db.flush()
     except BaseException:
         # The object was never recorded (rejected or DB failure): remove the orphaned bytes.

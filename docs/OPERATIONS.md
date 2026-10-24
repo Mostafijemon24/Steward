@@ -11,6 +11,8 @@
 | E-mail | your SMTP server | verification, password reset, notifications the user enabled | recipient, subject, a link; no task content |
 | TLS certificates | Let's Encrypt (ACME) | certificate issue/renewal | the domain name |
 | Docker image pulls / OS updates | Docker Hub, Ubuntu mirrors | on build/upgrade | none |
+| Malware signatures (if enabled) | database.clamav.net (freshclam container only) | every 2 hours | download only; no file content or metadata is uploaded |
+| WordPress draft posts (if enabled) | your WordPress site | approved steps only | the approved title/text and the Application Password (HTTPS, Basic auth) |
 
 There is **no** analytics, error-reporting SaaS, APM agent or log shipper in the stack. If you add
 one (Sentry, Grafana Cloud, Datadog…), send **aggregate metrics only** (the `/metrics` output
@@ -56,7 +58,7 @@ All values are aggregates: no user ids, workspace ids, e-mails, task text or fil
 | `steward_tasks{status}` | tasks by status |
 | `steward_model_calls_15m{outcome,location}` | model calls in the last 15 min, by recorded outcome |
 | `steward_model_latency_ms_avg_15m{outcome,location}` | average model latency |
-| `steward_audit_events_15m{action}` | security-relevant audit actions in the last 15 min: `policy.blocked`, `authz.denied`, `authz.role_denied`, `approval.binding_failed`, `auth.login_failed`, `file.deletion_refused`, `step.failed`, `task.finished` |
+| `steward_audit_events_15m{action}` | security-relevant audit actions in the last 15 min: `policy.blocked`, `authz.denied`, `authz.role_denied`, `approval.binding_failed`, `auth.login_failed`, `auth.mfa_failed`, `file.quarantined`, `file.deletion_refused`, `step.failed`, `task.finished` |
 | `steward_metrics_db_error` | 1 if the DB-derived metrics could not be read |
 | `steward_process_info{pid}`, `steward_process_uptime_seconds` | process identity / restarts |
 
@@ -83,6 +85,10 @@ Thresholds come from the provisional SLOs in `perf/slo.json`; tune them with rea
 | Brute force | `steward_audit_events_15m{action="auth.login_failed"} > 50` | rate limits already apply; review source IPs in Caddy logs |
 | Probing | `authz.denied` + `authz.role_denied` > 20 in 15 min | someone is enumerating IDs; review audit log |
 | Approval tampering | `approval.binding_failed > 0` | investigate: an approval was replayed or its parameters changed |
+| Second-step failures | `steward_audit_events_15m{action="auth.mfa_failed"} > 10` | someone has users' passwords; affected users are e-mailed automatically after 5 failures |
+| Malware found | `file.quarantined > 0` | a user uploaded an infected file; it is quarantined; check who and why |
+| Scanner down | `/readyz` reports `malware_scanner: unavailable` (uploads are refused meanwhile) | `docker compose ps clamav freshclam`; logs |
+| API container down | Caddy logs "no upstreams available" or only one API healthy for > 5 min | `docker compose ps api api-2`; the other keeps serving |
 | Deletion refused | `file.deletion_refused > 0` | expected when someone lacks rights; investigate repeats |
 | Backup | `backup.log` has no "done" line in 26 h, or weekly `restore.sh verify` ≠ VERIFIED | fix before anything else |
 | Disk | root or Docker volume > 80 % | prune images, move backups off-site (never delete volumes) |
