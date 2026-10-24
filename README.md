@@ -34,8 +34,6 @@
 > Real tools today: read attached files, analyse CSV/text, inspect web pages and run SEO audits on **allowlisted** sites, read a WordPress site and — if you allow it — create **draft** posts that you approve word for word, write reports, summarise with the model, run short Python programs in a sandbox (with approval), and *propose* file deletions. Publishing or editing live WordPress content, sending email and full browser automation are **not built** and are shown as such. Accounts can use two-step sign-in, and uploads can be malware-scanned with ClamAV.
 > No product is "completely secure"; what is enforced and tested — and what is not — is listed in [SECURITY_AND_PRIVACY.md](SECURITY_AND_PRIVACY.md).
 
-"Steward" is a placeholder product name.
-
 ---
 
 ## Table of contents
