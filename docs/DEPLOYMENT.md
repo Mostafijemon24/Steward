@@ -157,7 +157,7 @@ SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_USERNAME=no-reply@example.com
 SMTP_PASSWORD=<type it in the editor; never in shell history or chat>
-MODEL_PROVIDER=none                 # or openai_compatible + MODEL_* (see .env.example)
+MODEL_PROVIDER=none                 # or openrouter / openai_compatible + MODEL_* (see .env.example)
 ```
 
 Secret handling rules:

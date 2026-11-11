@@ -97,7 +97,9 @@ class Settings(BaseSettings):
     # "mock" = deterministic in-process planner for development and tests (refused in production).
     # "openai_compatible" = any /v1/chat/completions endpoint (OpenAI, Azure-compatible gateways,
     # or a self-hosted Ollama / vLLM / llama.cpp server).
-    model_provider: Literal["none", "mock", "openai_compatible"] = "none"
+    # "openrouter" = OpenRouter (https://openrouter.ai). Defaults to the free-model router so every
+    # :free model can serve requests; set MODEL_FREE_ONLY=false only if you intentionally use paid models.
+    model_provider: Literal["none", "mock", "openai_compatible", "openrouter"] = "none"
     model_base_url: str | None = None  # e.g. https://api.openai.com/v1 or http://ollama:11434/v1
     model_name: str = ""
     model_api_key: SecretStr | None = None  # server-side only; never sent to the browser or the model
@@ -105,6 +107,15 @@ class Settings(BaseSettings):
     # process but stays on your servers). "external" = a third-party service: data leaves your servers.
     model_location: Literal["local", "external"] = "external"
     model_provider_label: str = ""  # shown to users, e.g. "OpenAI (US)" or "Ollama on this server"
+    # OpenRouter only: keep traffic on $0 / :free models (and openrouter/free). When true and
+    # MODEL_NAME is empty, uses openrouter/free which routes across all free models.
+    model_free_only: bool = True
+    # OpenRouter only: comma-separated fallback model ids, or "auto" to discover every :free model
+    # from OpenRouter's /models list. Only :free / openrouter/free ids are sent when MODEL_FREE_ONLY=true.
+    model_fallbacks: str = "auto"
+    # OpenRouter ranking headers (optional). Defaults: APP_ORIGIN and "Steward".
+    model_site_url: str = ""
+    model_app_name: str = "Steward"
     model_timeout_seconds: float = 30.0
     model_max_retries: int = 2
     model_max_input_chars: int = 24_000
@@ -158,6 +169,22 @@ class Settings(BaseSettings):
                 problems.append("MODEL_BASE_URL and MODEL_NAME are required for the openai_compatible provider")
             elif self.model_location == "external" and not self.model_base_url.startswith("https://"):
                 problems.append("an external model provider must use https://")
+        if self.model_provider == "openrouter":
+            if not self.model_api_key:
+                problems.append("MODEL_API_KEY is required for the openrouter provider")
+            base = self.model_base_url or "https://openrouter.ai/api/v1"
+            if not base.startswith("https://"):
+                problems.append("OpenRouter must use https://")
+            if self.model_free_only:
+                name = (self.model_name or "openrouter/free").strip()
+                if name != "openrouter/free" and not name.endswith(":free"):
+                    problems.append("MODEL_FREE_ONLY requires MODEL_NAME=openrouter/free or an id ending in :free")
+                for part in self.model_fallbacks.split(","):
+                    mid = part.strip()
+                    if not mid or mid.lower() == "auto":
+                        continue
+                    if mid != "openrouter/free" and not mid.endswith(":free"):
+                        problems.append(f"MODEL_FREE_ONLY refuses non-free fallback {mid!r}")
         if self.egress_allow_private_networks or self.egress_allow_http:
             problems.append("EGRESS_ALLOW_PRIVATE_NETWORKS and EGRESS_ALLOW_HTTP must be false in production")
         for name in ("worker_database_url", "deletion_database_url"):

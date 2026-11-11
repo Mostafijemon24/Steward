@@ -322,6 +322,16 @@ MODEL_NAME=gpt-4o-mini
 MODEL_API_KEY=<your key — stays on the server>
 MODEL_LOCATION=external
 MODEL_PROVIDER_LABEL=OpenAI
+
+# D) OpenRouter — all free models (recommended zero-cost start)
+# Get a key at https://openrouter.ai/keys — free :free models need no credits.
+MODEL_PROVIDER=openrouter
+MODEL_API_KEY=<your OpenRouter key — stays on the server>
+MODEL_FREE_ONLY=true
+MODEL_FALLBACKS=auto
+# MODEL_NAME=                 # leave empty → openrouter/free (routes across every free model)
+# MODEL_NAME=google/gemma-4-31b-it:free   # or pin one free model
+MODEL_PROVIDER_LABEL=OpenRouter
 ```
 
 Then in the app: **Settings → Allowed domains** (add your website's domain so the agent may read it), pick a **privacy mode**, and create a task such as *"Run an SEO audit of https://yourdomain.com/ and write a report."*
@@ -515,10 +525,13 @@ Development emails are written to `api/var/mail-outbox/`.
 | `STEWARD_WORKER_PASSWORD` | — | Role for orchestrator/tools/scheduler (no DELETE, no secrets) |
 | `STEWARD_DELETER_PASSWORD` | — | Role for the deletion service only |
 | `STEWARD_READONLY_PASSWORD` | — | Read-only reporting role (no secrets) |
-| `MODEL_PROVIDER` | `none` | `none` · `openai_compatible` · `mock` (development only) |
-| `MODEL_BASE_URL`, `MODEL_NAME`, `MODEL_API_KEY` | — | Model endpoint, model and key (server-side only) |
+| `MODEL_PROVIDER` | `none` | `none` · `openai_compatible` · `openrouter` · `mock` (development only) |
+| `MODEL_BASE_URL`, `MODEL_NAME`, `MODEL_API_KEY` | — | Model endpoint, model and key (server-side only). OpenRouter defaults the base URL |
 | `MODEL_LOCATION` | `external` | `external` (third-party service) or `local` (you operate it) — shown to users |
-| `MODEL_PROVIDER_LABEL` | — | Name shown to users, e.g. "OpenAI" |
+| `MODEL_PROVIDER_LABEL` | — | Name shown to users, e.g. "OpenAI" or "OpenRouter" |
+| `MODEL_FREE_ONLY` | `true` | OpenRouter: only `:free` / `openrouter/free` (empty `MODEL_NAME` → free router) |
+| `MODEL_FALLBACKS` | `auto` | OpenRouter: `auto` discovers all free models, or a comma-separated `:free` list |
+| `MODEL_SITE_URL`, `MODEL_APP_NAME` | APP_ORIGIN / `Steward` | Optional OpenRouter ranking headers |
 | `MONTHLY_MODEL_TOKEN_QUOTA` | 2,000,000 | Per workspace (calls: `MONTHLY_MODEL_CALL_QUOTA`, 2,000) |
 | `SANDBOX_ENABLED` | `true` | Code steps run only if the tools worker can isolate them |
 | `DELETION_RETENTION_DAYS` | 30 | Deleted files are restorable for this long |

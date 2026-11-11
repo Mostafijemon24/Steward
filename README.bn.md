@@ -55,6 +55,15 @@ MODEL_BASE_URL=https://api.openai.com/v1
 MODEL_NAME=gpt-4o-mini
 MODEL_API_KEY=<আপনার key — শুধু সার্ভারে থাকে>
 MODEL_LOCATION=external
+
+# OpenRouter — সব ফ্রি মডেল দিয়ে চালানো (শূন্য খরচে শুরু)
+# কী নিন: https://openrouter.ai/keys — :free মডেলে ক্রেডিট লাগে না
+MODEL_PROVIDER=openrouter
+MODEL_API_KEY=<আপনার OpenRouter key — শুধু সার্ভারে থাকে>
+MODEL_FREE_ONLY=true
+MODEL_FALLBACKS=auto
+# MODEL_NAME= খালি রাখলে openrouter/free ব্যবহার হয় (সব ফ্রি মডেলে রাউট করে)
+MODEL_PROVIDER_LABEL=OpenRouter
 ```
 
 নতুন `.env` মানগুলো: `STEWARD_WORKER_PASSWORD`, `STEWARD_DELETER_PASSWORD`, `STEWARD_READONLY_PASSWORD` (প্রতিটি আলাদা র‍্যান্ডম পাসওয়ার্ড)। `docker compose up -d --build` চালালে `api`, `web`-এর পাশাপাশি `orchestrator`, `tools`, `deletion`, `scheduler` — চারটি ওয়ার্কার চালু হয়। অ্যাপে **Settings → Allowed domains**-এ আপনার সাইটের ডোমেইন যোগ করুন, একটি **privacy mode** বেছে নিন (Strict / Approval / Custom), তারপর টাস্ক দিন — যেমন *"Run an SEO audit of https://yourdomain.com/ and write a report."*

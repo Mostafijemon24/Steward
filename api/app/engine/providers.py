@@ -238,6 +238,22 @@ class MockProvider:
         return f"Summary ({len(body.split())} words reviewed): {head[:600]}"
 
 
+OPENROUTER_DEFAULT_BASE = "https://openrouter.ai/api/v1"
+OPENROUTER_FREE_ROUTER = "openrouter/free"
+_FREE_MODEL_CACHE: tuple[float, list[str]] | None = None
+_FREE_MODEL_CACHE_TTL_SECONDS = 30 * 60
+
+
+def is_openrouter_free_model(model_id: str) -> bool:
+    """True for OpenRouter's free router and catalog variants whose ids end in :free."""
+    mid = model_id.strip()
+    return mid == OPENROUTER_FREE_ROUTER or mid.endswith(":free")
+
+
+def _parse_fallback_list(raw: str) -> list[str]:
+    return [p.strip() for p in raw.split(",") if p.strip() and p.strip().lower() != "auto"]
+
+
 # ---------------------------------------------------------------- OpenAI-compatible
 class OpenAICompatibleProvider:
     def __init__(self, settings: Settings) -> None:
@@ -267,7 +283,10 @@ class OpenAICompatibleProvider:
             data_disclosure=disclosure,
         )
 
-    def generate(self, req: ModelRequest, *, timeout: float) -> ModelResponse:
+    def _extra_headers(self) -> dict[str, str]:
+        return {}
+
+    def _request_body(self, req: ModelRequest) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.settings.model_name,
             "messages": [{"role": m.role, "content": m.content} for m in req.messages],
@@ -276,7 +295,15 @@ class OpenAICompatibleProvider:
         }
         if req.json_output:
             body["response_format"] = {"type": "json_object"}
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        return body
+
+    def generate(self, req: ModelRequest, *, timeout: float) -> ModelResponse:
+        body = self._request_body(req)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            **self._extra_headers(),
+        }
         if self.settings.model_api_key is not None:
             headers["Authorization"] = "Bearer " + self.settings.model_api_key.get_secret_value()
         try:
@@ -314,6 +341,148 @@ class OpenAICompatibleProvider:
         )
 
 
+# ---------------------------------------------------------------- OpenRouter (free-model aware)
+class OpenRouterProvider(OpenAICompatibleProvider):
+    """OpenAI-compatible adapter tuned for OpenRouter, including all :free models.
+
+    With MODEL_FREE_ONLY=true (default) and an empty MODEL_NAME, uses openrouter/free so
+    OpenRouter routes each request across every free model that supports the needed features.
+    MODEL_FALLBACKS=auto discovers :free catalog ids and passes them as same-provider fallbacks
+    (still one provider — no silent switch to a different vendor).
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        base = (settings.model_base_url or OPENROUTER_DEFAULT_BASE).rstrip("/")
+        model = (settings.model_name or "").strip()
+        if settings.model_free_only and not model:
+            model = OPENROUTER_FREE_ROUTER
+        # Parent adapter uses model_location only for egress (tests may point at a local fake server).
+        # ProviderInfo.location stays external: OpenRouter is always a third-party service.
+        tuned = settings.model_copy(
+            update={
+                "model_base_url": base,
+                "model_name": model,
+                "model_provider_label": settings.model_provider_label or "OpenRouter",
+            }
+        )
+        super().__init__(tuned)
+        self.info = ProviderInfo(
+            key="openrouter",
+            label=tuned.model_provider_label,
+            model=tuned.model_name,
+            location="external",
+            configured=bool(base and tuned.model_name and tuned.model_api_key is not None),
+            data_disclosure=(
+                f"Task text you approve is sent to {tuned.model_provider_label}, an external AI gateway "
+                "(OpenRouter). With free-only mode, only $0 / :free models are used. Confidential data "
+                "is sent only after a one-time approval."
+            ),
+        )
+        if tuned.model_free_only:
+            primary = tuned.model_name
+            if not is_openrouter_free_model(primary):
+                raise ModelError(
+                    "model_not_configured",
+                    f"MODEL_FREE_ONLY is set but MODEL_NAME={primary!r} is not a free OpenRouter model "
+                    f"(use {OPENROUTER_FREE_ROUTER} or an id ending in :free).",
+                )
+            for mid in _parse_fallback_list(tuned.model_fallbacks):
+                if not is_openrouter_free_model(mid):
+                    raise ModelError(
+                        "model_not_configured",
+                        f"MODEL_FREE_ONLY refuses non-free fallback {mid!r}.",
+                    )
+
+    def _extra_headers(self) -> dict[str, str]:
+        site = (self.settings.model_site_url or self.settings.app_origin or "").strip()
+        title = (self.settings.model_app_name or "Steward").strip() or "Steward"
+        headers: dict[str, str] = {"X-Title": title}
+        if site:
+            headers["HTTP-Referer"] = site
+        return headers
+
+    def _discover_free_models(self, *, timeout: float) -> list[str]:
+        global _FREE_MODEL_CACHE
+        now = time.monotonic()
+        if _FREE_MODEL_CACHE is not None and (now - _FREE_MODEL_CACHE[0]) < _FREE_MODEL_CACHE_TTL_SECONDS:
+            return list(_FREE_MODEL_CACHE[1])
+        models_url = (self.settings.model_base_url or OPENROUTER_DEFAULT_BASE).rstrip("/") + "/models"
+        headers = {"Accept": "application/json", **self._extra_headers()}
+        if self.settings.model_api_key is not None:
+            headers["Authorization"] = "Bearer " + self.settings.model_api_key.get_secret_value()
+        try:
+            resp = EgressClient(self.policy, self.settings).request(
+                "GET",
+                models_url,
+                headers=headers,
+                timeout=min(timeout, 15.0),
+                max_bytes=2_000_000,
+            )
+        except (EgressBlocked, EgressFailed):
+            return list(_FREE_MODEL_CACHE[1]) if _FREE_MODEL_CACHE else [OPENROUTER_FREE_ROUTER]
+        if resp.status >= 400:
+            return list(_FREE_MODEL_CACHE[1]) if _FREE_MODEL_CACHE else [OPENROUTER_FREE_ROUTER]
+        try:
+            payload = json.loads(resp.body)
+            rows = payload.get("data") or []
+        except (ValueError, TypeError, AttributeError):
+            return list(_FREE_MODEL_CACHE[1]) if _FREE_MODEL_CACHE else [OPENROUTER_FREE_ROUTER]
+        found: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            mid = str(row.get("id") or "").strip()
+            if not mid:
+                continue
+            pricing = row.get("pricing") or {}
+            try:
+                prompt_price = float(pricing.get("prompt") or 1)
+                completion_price = float(pricing.get("completion") or 1)
+            except (TypeError, ValueError):
+                prompt_price, completion_price = 1.0, 1.0
+            if mid.endswith(":free") or mid == OPENROUTER_FREE_ROUTER or (prompt_price == 0 and completion_price == 0):
+                # Skip non-chat safety classifiers that are useless for planning.
+                if "content-safety" in mid:
+                    continue
+                found.append(mid)
+        # Prefer the free router first, then stable order for the rest.
+        ordered = sorted(set(found), key=lambda m: (0 if m == OPENROUTER_FREE_ROUTER else 1, m))
+        if not ordered:
+            ordered = [OPENROUTER_FREE_ROUTER]
+        _FREE_MODEL_CACHE = (now, ordered)
+        return list(ordered)
+
+    def _fallback_models(self, *, timeout: float) -> list[str]:
+        raw = (self.settings.model_fallbacks or "").strip()
+        primary = self.settings.model_name
+        if not raw:
+            return []
+        if raw.lower() == "auto":
+            if not self.settings.model_free_only:
+                return []
+            discovered = self._discover_free_models(timeout=timeout)
+            return [m for m in discovered if m != primary]
+        listed = _parse_fallback_list(raw)
+        if self.settings.model_free_only:
+            listed = [m for m in listed if is_openrouter_free_model(m)]
+        return [m for m in listed if m != primary]
+
+    def _request_body(self, req: ModelRequest) -> dict[str, Any]:
+        body = super()._request_body(req)
+        fallbacks = self._fallback_models(timeout=self.settings.model_timeout_seconds)
+        # OpenRouter's models[] array is same-provider routing only (not a switch to another vendor).
+        # With free-only + auto, this keeps retries inside the free catalog when a free endpoint is full.
+        if fallbacks:
+            body["models"] = fallbacks[:24]
+        return body
+
+
+def clear_openrouter_free_model_cache() -> None:
+    """Tests only."""
+    global _FREE_MODEL_CACHE
+    _FREE_MODEL_CACHE = None
+
+
 # ---------------------------------------------------------------- selection
 _override: ModelProvider | None = None
 
@@ -334,6 +503,12 @@ def get_provider(settings: Settings | None = None) -> ModelProvider:
         return MockProvider()
     if s.model_provider == "openai_compatible":
         p = OpenAICompatibleProvider(s)
+        return p if p.info.configured else NoProvider()
+    if s.model_provider == "openrouter":
+        try:
+            p = OpenRouterProvider(s)
+        except ModelError:
+            return NoProvider()
         return p if p.info.configured else NoProvider()
     return NoProvider()
 

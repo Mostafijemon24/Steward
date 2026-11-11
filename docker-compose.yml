@@ -36,6 +36,10 @@ x-model-env: &model-env
   MODEL_API_KEY: ${MODEL_API_KEY:-}
   MODEL_LOCATION: ${MODEL_LOCATION:-external}
   MODEL_PROVIDER_LABEL: ${MODEL_PROVIDER_LABEL:-}
+  MODEL_FREE_ONLY: ${MODEL_FREE_ONLY:-true}
+  MODEL_FALLBACKS: ${MODEL_FALLBACKS:-auto}
+  MODEL_SITE_URL: ${MODEL_SITE_URL:-}
+  MODEL_APP_NAME: ${MODEL_APP_NAME:-Steward}
   MONTHLY_MODEL_TOKEN_QUOTA: ${MONTHLY_MODEL_TOKEN_QUOTA:-2000000}
 
 # Bounded logs on every service (docker json-file rotation): 5 × 10 MB per container.
