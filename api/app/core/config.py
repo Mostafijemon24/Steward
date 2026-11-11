@@ -170,8 +170,10 @@ class Settings(BaseSettings):
             elif self.model_location == "external" and not self.model_base_url.startswith("https://"):
                 problems.append("an external model provider must use https://")
         if self.model_provider == "openrouter":
-            if not self.model_api_key:
-                problems.append("MODEL_API_KEY is required for the openrouter provider")
+            # The API container deliberately gets an empty MODEL_API_KEY (it only describes the
+            # provider). Orchestrator/tools workers must have the real key.
+            if self.process_role != "api" and not self.model_api_key:
+                problems.append("MODEL_API_KEY is required for the openrouter provider on workers")
             base = self.model_base_url or "https://openrouter.ai/api/v1"
             if not base.startswith("https://"):
                 problems.append("OpenRouter must use https://")

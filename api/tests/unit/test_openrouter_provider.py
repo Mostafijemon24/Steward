@@ -204,18 +204,22 @@ def test_openrouter_production_requires_api_key_and_free_ids() -> None:
         model_provider="openrouter",
         model_free_only=True,
     )
+    # API process may omit the key (compose clears it); workers must have it.
+    Settings(_env_file=None, **base, process_role="api", model_name="openrouter/free")
     with pytest.raises(ValueError, match="MODEL_API_KEY"):
-        Settings(_env_file=None, **base)
+        Settings(_env_file=None, **base, process_role="worker", model_name="openrouter/free")
     with pytest.raises(ValueError, match="MODEL_FREE_ONLY"):
         Settings(
             _env_file=None,
             **base,
+            process_role="api",
             model_api_key=SecretStr("or-prod-key"),
             model_name="openai/gpt-4o-mini",
         )
     Settings(
         _env_file=None,
         **base,
+        process_role="worker",
         model_api_key=SecretStr("or-prod-key"),
         model_name="openrouter/free",
         model_fallbacks="auto",

@@ -371,7 +371,8 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             label=tuned.model_provider_label,
             model=tuned.model_name,
             location="external",
-            configured=bool(base and tuned.model_name and tuned.model_api_key is not None),
+            # API containers omit MODEL_API_KEY on purpose; workers hold the key and call OpenRouter.
+            configured=bool(base and tuned.model_name),
             data_disclosure=(
                 f"Task text you approve is sent to {tuned.model_provider_label}, an external AI gateway "
                 "(OpenRouter). With free-only mode, only $0 / :free models are used. Confidential data "

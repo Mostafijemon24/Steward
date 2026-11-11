@@ -1,0 +1,18 @@
+# Hostinger cPanel VPS: Apache owns :80/:443. Do not start the Caddy tls profile.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.hostinger.yml up -d --build
+services:
+  web:
+    ports: !override
+      - "127.0.0.1:3070:3000"
+
+  # Production mail needs outbound SMTP; stock compose keeps the API on internal-only nets.
+  api:
+    networks: [backend, apinet, scan, egress]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  api-2:
+    networks: [backend, apinet, scan, egress]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
