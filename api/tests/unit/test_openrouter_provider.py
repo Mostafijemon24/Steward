@@ -154,12 +154,45 @@ def test_openrouter_free_provider_uses_router_and_auto_fallbacks() -> None:
     assert post["auth"] == "Bearer or-test-key"
     assert post["body"]["model"] == "openrouter/free"
     assert post["body"]["response_format"] == {"type": "json_object"}
-    assert "google/gemma-4-31b-it:free" in post["body"]["models"]
-    assert "nvidia/nemotron-3.5-lightning:free" in post["body"]["models"]
-    assert "openai/gpt-4o-mini" not in post["body"]["models"]
-    assert "content-safety" not in str(post["body"]["models"])
+    # openrouter/free already covers the free catalog — auto mode omits models[]
+    assert "models" not in post["body"]
     assert post["title"] == "Steward"
     assert post["referer"] == "https://steward.example"
+    fake.srv.shutdown()
+
+
+def test_openrouter_pinned_free_model_uses_at_most_three_fallbacks() -> None:
+    clear_openrouter_free_model_cache()
+    fake = _FakeOpenRouter()
+    base = fake.start()
+    s = _dev_settings(
+        model_provider="openrouter",
+        model_base_url=base,
+        model_name="google/gemma-4-31b-it:free",
+        model_api_key=SecretStr("or-test-key"),
+        model_free_only=True,
+        model_fallbacks="auto",
+        model_location="local",
+        model_provider_label="OpenRouter",
+        model_site_url="https://steward.example",
+        model_app_name="Steward",
+    )
+    p = OpenRouterProvider(s)
+    p.generate(
+        ModelRequest(
+            purpose="plan",
+            messages=[ModelMessage("user", "plan a task")],
+            max_output_tokens=200,
+            json_output=True,
+        ),
+        timeout=5.0,
+    )
+    post = next(r for r in fake.requests if r.get("method") == "POST")
+    assert post["body"]["model"] == "google/gemma-4-31b-it:free"
+    assert post["body"]["models"][0] == "openrouter/free"
+    assert len(post["body"]["models"]) <= 3
+    assert "openai/gpt-4o-mini" not in post["body"]["models"]
+    assert "content-safety" not in str(post["body"]["models"])
     fake.srv.shutdown()
 
 

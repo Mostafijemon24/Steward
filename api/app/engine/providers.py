@@ -461,8 +461,16 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         if raw.lower() == "auto":
             if not self.settings.model_free_only:
                 return []
+            # openrouter/free already routes across the free catalog — extra models[] is unnecessary
+            # and OpenRouter rejects arrays longer than 3.
+            if primary == OPENROUTER_FREE_ROUTER:
+                return []
             discovered = self._discover_free_models(timeout=timeout)
-            return [m for m in discovered if m != primary]
+            # Prefer the free router first, then other free ids (still max 3 in _request_body).
+            ordered = [m for m in discovered if m != primary]
+            if OPENROUTER_FREE_ROUTER in ordered:
+                ordered = [OPENROUTER_FREE_ROUTER] + [m for m in ordered if m != OPENROUTER_FREE_ROUTER]
+            return ordered
         listed = _parse_fallback_list(raw)
         if self.settings.model_free_only:
             listed = [m for m in listed if is_openrouter_free_model(m)]
@@ -472,9 +480,9 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         body = super()._request_body(req)
         fallbacks = self._fallback_models(timeout=self.settings.model_timeout_seconds)
         # OpenRouter's models[] array is same-provider routing only (not a switch to another vendor).
-        # With free-only + auto, this keeps retries inside the free catalog when a free endpoint is full.
+        # OpenRouter currently accepts at most 3 fallback model ids.
         if fallbacks:
-            body["models"] = fallbacks[:24]
+            body["models"] = fallbacks[:3]
         return body
 
 
